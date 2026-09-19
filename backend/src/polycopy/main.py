@@ -115,7 +115,7 @@ async def list_wallets(db: AsyncSession = Depends(get_db)) -> dict:
                 "address": w.address,
                 "label": w.label,
                 "approval_state": w.approval_state,
-                "is_approved": w.is_approved,
+                "is_approved": w.is_approved,  # derived from approval_state
                 "is_sample": w.is_sample,
             }
             for w in wallets

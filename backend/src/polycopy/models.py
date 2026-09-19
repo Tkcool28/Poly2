@@ -3,6 +3,14 @@
 Chunk 1 note: nothing writes to these tables yet except Alembic migrations.
 The API exposes read endpoints that will simply return empty collections
 until the ingestion service lands in Chunk 2.
+
+Design rules baked in here:
+
+* Wallet approval has ONE source of truth: ``approval_state``. Any boolean
+  view is derived from it, never stored independently.
+* Tradable identity is first-class: markets carry ``clob_token_ids`` (the
+  condition→token mapping) and trades carry ``asset_id`` (the CLOB token
+  actually traded). Human-readable outcome text is display data, not a key.
 """
 
 from __future__ import annotations
@@ -28,6 +36,11 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+# Wallet approval state machine: the single source of truth.
+# discovered -> pending_review -> approved | rejected; approved -> disabled
+WALLET_STATES = ("discovered", "pending_review", "approved", "rejected", "disabled")
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -38,9 +51,8 @@ class Wallet(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     address: Mapped[str] = mapped_column(String(42), unique=True, index=True)
     label: Mapped[str | None] = mapped_column(String(120))
-    # State machine: discovered -> pending_review -> approved | rejected
+    # Single source of truth for approval. No parallel boolean.
     approval_state: Mapped[str] = mapped_column(String(20), default="discovered")
-    is_approved: Mapped[bool] = mapped_column(Boolean, default=False)
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -48,6 +60,11 @@ class Wallet(Base):
     )
 
     trades: Mapped[list["Trade"]] = relationship(back_populates="wallet")
+
+    @property
+    def is_approved(self) -> bool:
+        """Derived view only — never stored."""
+        return self.approval_state == "approved"
 
 
 class Market(Base):
@@ -57,6 +74,9 @@ class Market(Base):
     condition_id: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     question: Mapped[str] = mapped_column(Text)
     slug: Mapped[str | None] = mapped_column(String(200))
+    # {"Yes": "7132104...", "No": "5211431..."} — outcome -> clob_token_id.
+    # The tradable identity on Polymarket is the token, not the outcome text.
+    clob_token_ids: Mapped[dict | None] = mapped_column(JSON)
     outcomes: Mapped[list | None] = mapped_column(JSON)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     closed: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -68,7 +88,12 @@ class Market(Base):
 
 
 class Trade(Base):
-    """A trade observed on Polymarket by any wallet (raw ingestion record)."""
+    """A trade observed on Polymarket by any wallet (raw ingestion record).
+
+    ``polymarket_trade_id`` uniqueness encodes the canonical source-identity
+    contract — see docs/source-identity-contract.md. Do NOT populate it from
+    an assumed field before that audit is complete.
+    """
 
     __tablename__ = "trades"
     __table_args__ = (
@@ -79,6 +104,8 @@ class Trade(Base):
     polymarket_trade_id: Mapped[str] = mapped_column(String(80))
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"), index=True)
+    # The CLOB token actually traded — first-class tradable identity.
+    asset_id: Mapped[str | None] = mapped_column(String(80), index=True)
     side: Mapped[str] = mapped_column(String(4))  # BUY / SELL
     outcome: Mapped[str] = mapped_column(String(40))
     size: Mapped[float] = mapped_column(Numeric(20, 6))
