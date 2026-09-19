@@ -2,11 +2,15 @@ name: Source Identity Probe
 
 on:
   workflow_dispatch:
+  issue_comment:
+    types: [created]
 
 jobs:
   probe:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.comment.body, '/probe')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Run source-identity probe
         run: python3 backend/scripts/probe_source_identity.py
+        
