@@ -1,9 +1,5 @@
 """SQLAlchemy 2.0 models — full schema for the rebuild vision.
 
-Chunk 1 note: nothing writes to these tables yet except Alembic migrations.
-The API exposes read endpoints that will simply return empty collections
-until the ingestion service lands in Chunk 2.
-
 Design rules baked in here:
 
 * Wallet approval has ONE source of truth: ``approval_state``. Any boolean
@@ -90,9 +86,9 @@ class Market(Base):
 class Trade(Base):
     """A trade observed on Polymarket by any wallet (raw ingestion record).
 
-    ``polymarket_trade_id`` uniqueness encodes the canonical source-identity
-    contract — see docs/source-identity-contract.md. Do NOT populate it from
-    an assumed field before that audit is complete.
+    ``polymarket_trade_id`` holds the composite canonical key defined in
+    docs/source-identity-contract.md:
+    ``data-api:{txHash}:{wallet}:{asset}:{size}:{price}:{timestamp}``
     """
 
     __tablename__ = "trades"
@@ -101,7 +97,7 @@ class Trade(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    polymarket_trade_id: Mapped[str] = mapped_column(String(80))
+    polymarket_trade_id: Mapped[str] = mapped_column(String(160))
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"), index=True)
     # The CLOB token actually traded — first-class tradable identity.
