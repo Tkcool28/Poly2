@@ -1,0 +1,161 @@
+"""Polymarket API client — bounded, retried, and parse-aware.
+
+One client instance owns:
+
+* a global asyncio semaphore capping concurrent in-flight requests
+  (``ingestion_max_concurrent_requests``, default 4) — this is the primary
+  defense against the "many calls at once ate the box" failure mode;
+* retry-with-backoff on 429 / 5xx / transport errors (bounded attempts);
+* response parsing for known API quirks, notably Gamma's ``clobTokenIds``
+  and ``outcomes`` fields, which the probe verified are JSON-ENCODED
+  STRINGS (e.g. ``"[\\"4667...\\", \\"8761...\\"]"``), not native arrays.
+
+Endpoints (all verified by the source-identity probe, 2026-09-19):
+* Data API ``GET /trades?user=`` — trade history for a wallet
+* Data API ``GET /positions?user=`` — position reconciliation
+* Gamma API ``GET /markets?condition_ids=`` — market metadata + token map
+* CLOB API ``GET /markets/{condition_id}`` — token map fallback
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, Self
+
+import httpx
+
+from polycopy.config import get_settings
+from polycopy.logging_config import get_logger
+
+DATA_API_BASE = "https://data-api.polymarket.com"
+GAMMA_API_BASE = "https://gamma-api.polymarket.com"
+CLOB_API_BASE = "https://clob.polymarket.com"
+
+_MAX_RETRIES = 3
+_BACKOFF_BASE_SECONDS = 0.5
+
+
+class PolymarketAPIError(Exception):
+    """Raised when an endpoint fails after all retries."""
+
+
+class PolymarketClient:
+    """Async client with a global concurrency cap and bounded retries."""
+
+    def __init__(
+        self,
+        *,
+        max_concurrent: int | None = None,
+        timeout_seconds: float = 20.0,
+        http_client: httpx.AsyncClient | None = None,
+    ) -> None:
+        settings = get_settings()
+        self._max_concurrent = (
+            max_concurrent
+            if max_concurrent is not None
+            else settings.ingestion_max_concurrent_requests
+        )
+        self._semaphore = asyncio.Semaphore(self._max_concurrent)
+        self._client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
+        self._owns_client = http_client is None
+        self._logger = get_logger("polycopy.ingestion.client")
+
+    async def aclose(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._max_concurrent
+
+    async def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
+        """GET with concurrency cap + bounded retry/backoff. Fail-closed."""
+        last_error: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            async with self._semaphore:
+                try:
+                    resp = await self._client.get(url, params=params)
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    self._logger.warning(
+                        "api_transport_error", url=url, attempt=attempt, error=str(exc)
+                    )
+                else:
+                    if resp.status_code == 200:
+                        return resp.json()
+                    if resp.status_code in (429, 500, 502, 503, 504):
+                        last_error = PolymarketAPIError(
+                            f"{url} returned {resp.status_code}"
+                        )
+                        self._logger.warning(
+                            "api_retryable_status",
+                            url=url,
+                            status=resp.status_code,
+                            attempt=attempt,
+                        )
+                    else:
+                        # 4xx (non-429) is a caller bug or bad input — no retry.
+                        raise PolymarketAPIError(
+                            f"{url} returned non-retryable {resp.status_code}: "
+                            f"{resp.text[:200]}"
+                        )
+            if attempt < _MAX_RETRIES - 1:
+                await asyncio.sleep(_BACKOFF_BASE_SECONDS * (2**attempt))
+        raise PolymarketAPIError(f"{url} failed after {_MAX_RETRIES} attempts: {last_error}")
+
+    # --- Data API --------------------------------------------------------
+
+    async def get_trades(self, wallet: str, *, limit: int = 500) -> list[dict[str, Any]]:
+        """Trade history for one wallet, most recent first.
+
+        ``limit`` is hard-capped by the caller (service enforces the
+        configured batch size); this method never paginates beyond one
+        request.
+        """
+        return await self._get(
+            f"{DATA_API_BASE}/trades", params={"user": wallet, "limit": limit}
+        )
+
+    async def get_positions(self, wallet: str) -> list[dict[str, Any]]:
+        """Current positions for reconciliation (probe-verified fields
+        include realizedPnl, cashPnl, avgPrice, totalBought)."""
+        return await self._get(f"{DATA_API_BASE}/positions", params={"user": wallet})
+
+    # --- Gamma API -------------------------------------------------------
+
+    @staticmethod
+    def _parse_json_string(value: Any) -> Any:
+        """Gamma returns clobTokenIds/outcomes as JSON-encoded strings."""
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
+
+    async def get_gamma_market(self, condition_id: str) -> dict[str, Any] | None:
+        """Market metadata incl. parsed clobTokenIds/outcomes. None if absent."""
+        markets = await self._get(
+            f"{GAMMA_API_BASE}/markets", params={"condition_ids": condition_id}
+        )
+        if not markets:
+            return None
+        market = markets[0]
+        market["clobTokenIds"] = self._parse_json_string(market.get("clobTokenIds"))
+        market["outcomes"] = self._parse_json_string(market.get("outcomes"))
+        return market
+
+    async def get_clob_market(self, condition_id: str) -> dict[str, Any]:
+        """CLOB market object (token mapping fallback)."""
+        return await self._get(f"{CLOB_API_BASE}/markets/{condition_id}")
+
+
+def clob_token_map(gamma_market: dict[str, Any]) -> dict[str, str]:
+    """Build {outcome: clob_token_id} from a parsed Gamma market object."""
+    outcomes = gamma_market.get("outcomes") or []
+    token_ids = gamma_market.get("clobTokenIds") or []
+    return {str(o): str(t) for o, t in zip(outcomes, token_ids, strict=False)}

@@ -1,9 +1,10 @@
 # Source Identity Contract
 
-> **STATUS: AUDITED against live Data API (2026-09-19), with items marked
-> ⚠ PENDING-VPS requiring verification from an unrestricted network (the
-> build sandbox cannot reach Gamma/CLOB APIs). Run
-> `backend/scripts/probe_source_identity.py` on the VPS to close them.**
+> **STATUS: FULLY VERIFIED ✅ — probe run via GitHub Actions
+> (`probe_source_identity.py`) on 2026-09-19 returned RESULT: PASS for all
+> four checks: Data API /trades identity (200-trade sample, 0 composite
+> collisions), Data API /positions, Gamma /markets, CLOB
+> /markets/{condition_id}. No ⚠ PENDING-VPS items remain.**
 
 ## Why this document exists
 
@@ -55,7 +56,9 @@ polymarket_trade_id =
 - Residual risk: two identical fills of the same size/price for the same
   wallet in one transaction would collapse into one row (undercount). Judged
   rare; mitigated by periodic position reconciliation against
-  Data API `GET /positions?user=<wallet>` (⚠ PENDING-VPS verification).
+  Data API `GET /positions?user=<wallet>` — ✅ probe-verified: the endpoint
+  returns rich fields including `realizedPnl`, `cashPnl`, `avgPrice`,
+  `totalBought`, `negativeRisk`, `redeemable`, `entryFeesUsdc`.
 - `trades.polymarket_trade_id` widened to String(160) in migration 0002 to
   fit this composite.
 
@@ -65,8 +68,12 @@ polymarket_trade_id =
 - Tradable unit: CLOB token ID (`asset` above → `trades.asset_id`).
 - The condition_id ↔ {outcome: clob_token_id} mapping populates
   `markets.clob_token_ids` from Gamma API market objects (`clobTokenIds`
-  field). ⚠ PENDING-VPS: Gamma API unreachable from the build sandbox;
-  confirm field name and structure via the probe script.
+  field). ✅ probe-verified, with an important quirk: **Gamma returns
+  `clobTokenIds` and `outcomes` as JSON-ENCODED STRINGS** (e.g.
+  `"[\"4667...\", \"8761...\"]"` and `"[\"Up\", \"Down\"]"`), not native
+  arrays — parsers MUST `json.loads` them (handled by
+  `PolymarketClient._parse_json_string`). CLOB API
+  `/markets/{condition_id}` token_ids match Gamma exactly (verified).
 
 ## Wallet identity
 
@@ -77,17 +84,18 @@ polymarket_trade_id =
 
 | Endpoint | Purpose | Status |
 |---|---|---|
-| Data API `GET /trades` | Trade ingestion | ✅ Audited 2026-09-19 |
-| Data API `GET /activity` | Redemptions/liquidity events for accounting | ⚠ PENDING-VPS |
-| Data API `GET /positions` | Position reconciliation | ⚠ PENDING-VPS |
-| Gamma API `GET /markets` | Market metadata + token mapping | ⚠ PENDING-VPS |
-| CLOB API `GET /markets/{condition_id}` | Token mapping fallback | ⚠ PENDING-VPS |
+| Data API `GET /trades` | Trade ingestion | ✅ Audited 2026-09-19; probe PASS (200 sample, 0 collisions) |
+| Data API `GET /positions` | Position reconciliation | ✅ Probe PASS 2026-09-19 |
+| Gamma API `GET /markets` | Market metadata + token mapping | ✅ Probe PASS 2026-09-19 (clobTokenIds = JSON string) |
+| CLOB API `GET /markets/{condition_id}` | Token mapping fallback | ✅ Probe PASS 2026-09-19 (token_ids match Gamma) |
+| Data API `GET /activity` | Redemptions/liquidity events for accounting | ⏳ Not yet audited — scheduled for PR-C (settlement feed) |
 
 ## Fixed rules (not audit-dependent)
 
 - Wallet addresses stored lowercase.
 - Tradable identity is the CLOB token ID; outcome text is display data.
 - `outcomeIndex` is never used as a key.
-- Anything unverifiable from the sandbox is marked ⚠ PENDING-VPS and must be
-  confirmed by `backend/scripts/probe_source_identity.py` before ingestion
-  is considered live-ready.
+- Gamma `clobTokenIds` / `outcomes` are JSON-encoded strings — always parse.
+- Anything unverifiable from the sandbox is verified by
+  `backend/scripts/probe_source_identity.py` (GitHub Actions,
+  workflow_dispatch) before the code that depends on it ships.
