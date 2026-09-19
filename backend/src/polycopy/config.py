@@ -72,7 +72,7 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
-    def _fail_closed(self) -> "Settings":
+    def _fail_closed(self) -> Settings:
         """Reject unsafe combinations. Fail-closed: doubt means error."""
         if not self.allow_live_trading and self.polymarket_private_key:
             raise ValueError(

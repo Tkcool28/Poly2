@@ -59,7 +59,7 @@ class Wallet(Base):
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
-    trades: Mapped[list["Trade"]] = relationship(back_populates="wallet")
+    trades: Mapped[list[Trade]] = relationship(back_populates="wallet")
 
     @property
     def is_approved(self) -> bool:
@@ -84,7 +84,7 @@ class Market(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    trades: Mapped[list["Trade"]] = relationship(back_populates="market")
+    trades: Mapped[list[Trade]] = relationship(back_populates="market")
 
 
 class Trade(Base):
