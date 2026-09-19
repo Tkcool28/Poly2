@@ -26,6 +26,7 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "ruff>=0.5",
+    "aiosqlite>=0.20",
 ]
 
 [tool.setuptools.packages.find]
