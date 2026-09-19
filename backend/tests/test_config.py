@@ -30,12 +30,20 @@ def test_live_trading_with_paper_mode_is_ambiguous_and_rejected():
         _settings(allow_live_trading=True, paper_mode=True)
 
 
-def test_live_trading_with_kill_switch_on_is_rejected():
-    with pytest.raises(ValidationError, match="KILL_SWITCH"):
-        _settings(allow_live_trading=True, paper_mode=False, order_kill_switch=True)
+def test_live_capable_boot_with_kill_switch_on_is_allowed():
+    """The intended staging posture: live-capable, execution blocked."""
+    s = _settings(
+        allow_live_trading=True,
+        paper_mode=False,
+        order_kill_switch=True,
+        polymarket_private_key="0xdeadbeef",
+    )
+    assert s.allow_live_trading is True
+    assert s.order_kill_switch is True
 
 
-def test_valid_live_config_is_allowed():
+def test_armed_live_config_is_allowed():
+    """Fully armed live mode (kill switch cleared) is a legal explicit state."""
     s = _settings(
         allow_live_trading=True,
         paper_mode=False,
@@ -43,6 +51,7 @@ def test_valid_live_config_is_allowed():
         polymarket_private_key="0xdeadbeef",
     )
     assert s.allow_live_trading is True
+    assert s.order_kill_switch is False
 
 
 def test_invalid_environment_rejected():
@@ -54,7 +63,7 @@ def test_public_dict_strips_secrets():
     s = _settings(
         allow_live_trading=True,
         paper_mode=False,
-        order_kill_switch=False,
+        order_kill_switch=True,
         polymarket_private_key="0xdeadbeef",
     )
     public = s.public_dict()

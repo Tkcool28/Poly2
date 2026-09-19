@@ -24,7 +24,9 @@ services:
   migrate:
     build: ./backend
     command: ["alembic", "upgrade", "head"]
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -32,7 +34,9 @@ services:
 
   backend:
     build: ./backend
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       postgres:
         condition: service_healthy
@@ -49,7 +53,9 @@ services:
   bot:
     build: ./backend
     command: ["python", "-m", "polycopy.bot.daemon"]
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       backend:
         condition: service_started

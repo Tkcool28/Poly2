@@ -1,11 +1,16 @@
 """Environment-based configuration with fail-closed validation.
 
-Safety rules enforced here (imported from Polycopy v1's philosophy):
+Safety model (corrected after review):
 
-* Paper mode is the default and live trading is OFF unless explicitly enabled.
-* If ``allow_live_trading`` is False (the default), the presence of any
-  private key material in the environment is a hard config error.
-* There is no "default allow" path anywhere in the system.
+* ``order_kill_switch`` is an INDEPENDENT global execution gate. When ON it
+  blocks ALL order creation — paper and live. It is deliberately allowed in
+  combination with live mode: the safe way to boot a live-capable system is
+  with the kill switch ON (connect, reconcile, observe — execute nothing).
+  Clearing the kill switch is an explicit, separate operator action.
+* ``allow_live_trading`` only controls which execution broker implementation
+  the system loads (PaperExecutionBroker vs LiveExecutionBroker, Chunk 2/3).
+* Private key material while ``allow_live_trading`` is False remains a hard
+  startup error. There is no "default allow" path anywhere in the system.
 """
 
 from __future__ import annotations
@@ -28,7 +33,10 @@ class Settings(BaseSettings):
     environment: str = "development"
     paper_mode: bool = True
     allow_live_trading: bool = False
-    order_kill_switch: bool = True  # defaults ON: nothing may trade until explicitly cleared
+    # Global execution gate: blocks ALL order creation (paper AND live).
+    # Defaults ON. Live-capable boot with kill switch ON is the intended
+    # staging posture: connect and reconcile, execute nothing.
+    order_kill_switch: bool = True
 
     # --- Secrets (must stay empty while allow_live_trading is False) -----
     polymarket_private_key: str = ""
@@ -64,7 +72,7 @@ class Settings(BaseSettings):
         return v
 
     @model_validator(mode="after")
-    def _fail_closed(self) -> "Settings":
+    def _fail_closed(self) -> Settings:
         """Reject unsafe combinations. Fail-closed: doubt means error."""
         if not self.allow_live_trading and self.polymarket_private_key:
             raise ValueError(
@@ -77,11 +85,8 @@ class Settings(BaseSettings):
                 "POLYCOPY_ALLOW_LIVE_TRADING=true and POLYCOPY_PAPER_MODE=true "
                 "is ambiguous. Set POLYCOPY_PAPER_MODE=false to run live."
             )
-        if self.order_kill_switch and self.allow_live_trading:
-            raise ValueError(
-                "POLYCOPY_ORDER_KILL_SWITCH=true blocks all order creation; "
-                "combining it with live trading is almost certainly a mistake."
-            )
+        # NOTE: allow_live_trading + order_kill_switch=True is INTENTIONALLY
+        # ALLOWED — it is the safe staging posture for a live-capable system.
         return self
 
     def public_dict(self) -> dict:
