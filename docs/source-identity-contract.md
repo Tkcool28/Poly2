@@ -88,7 +88,9 @@ polymarket_trade_id =
 | Data API `GET /positions` | Position reconciliation | ✅ Probe PASS 2026-09-19 |
 | Gamma API `GET /markets` | Market metadata + token mapping | ✅ Probe PASS 2026-09-19 (clobTokenIds = JSON string) |
 | CLOB API `GET /markets/{condition_id}` | Token mapping fallback | ✅ Probe PASS 2026-09-19 (token_ids match Gamma) |
-| Data API `GET /activity` | Redemptions/liquidity events for accounting | ⏳ Not yet audited — scheduled for PR-C (settlement feed) |
+| Data API `GET /activity` | Redemptions/liquidity events for accounting | ⏳ Not yet audited — PR-C used Gamma outcomePrices for settlement instead; audit /activity before relying on it |
+
+**PR-C addition (2026-09-20):** settlement detection uses Gamma `closed=true` + `outcomePrices` collapse to exactly one `1`. Parsing is strict/fail-closed (ambiguity → skip, never settle). The collapse behavior itself is ⏳ pending probe verification against a freshly resolved market — see docs/accounting-method.md.
 
 ## Fixed rules (not audit-dependent)
 

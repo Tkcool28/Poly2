@@ -132,7 +132,7 @@ class PolymarketClient:
 
     @staticmethod
     def _parse_json_string(value: Any) -> Any:
-        """Gamma returns clobTokenIds/outcomes as JSON-encoded strings."""
+        """Gamma returns clobTokenIds/outcomes/outcomePrices as JSON strings."""
         if isinstance(value, str):
             return json.loads(value)
         return value
@@ -147,6 +147,7 @@ class PolymarketClient:
         market = markets[0]
         market["clobTokenIds"] = self._parse_json_string(market.get("clobTokenIds"))
         market["outcomes"] = self._parse_json_string(market.get("outcomes"))
+        market["outcomePrices"] = self._parse_json_string(market.get("outcomePrices"))
         return market
 
     async def get_clob_market(self, condition_id: str) -> dict[str, Any]:
