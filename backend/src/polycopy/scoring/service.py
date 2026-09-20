@@ -7,6 +7,9 @@ is the only truth):
   re-verdicted. Human decisions (``approved`` / ``rejected`` / ``disabled``)
   are never overridden by the scorer.
 * Verdict ``pending_review`` → wallet state + one open ApprovalQueueEntry.
+* Verdict drops below the review band while a wallet sits in
+  ``pending_review`` → back to ``discovered`` and its stale queue entry
+  is WITHDRAWN (a human must never approve off an outdated score).
 * Verdict ``insufficient_history`` → stays ``discovered``; automatically
   rescored on future cycles. Lack of evidence is never terminal.
 * Verdict ``score_rejected`` → stays ``discovered`` too: machine verdicts
@@ -106,7 +109,7 @@ async def build_wallet_stats(
 
 
 async def _apply_verdict(
-    session: AsyncSession, wallet: Wallet, result: sc.ScoreResult
+    session: AsyncSession, wallet: Wallet, result: sc.ScoreResult, *, now: datetime
 ) -> None:
     """Route the verdict into the approval state machine. Never overrides
     human decisions (approved/rejected-by-human/disabled)."""
@@ -124,9 +127,31 @@ async def _apply_verdict(
         ).scalar_one_or_none()
         if open_entry is None:
             session.add(ApprovalQueueEntry(wallet_id=wallet.id, state="pending"))
-    # insufficient_history / score_rejected / discovered → leave state
-    # as-is: the wallet stays in the automatic rescan pool, and
-    # "rejected" in approval_state is reserved for human decisions.
+    elif wallet.approval_state == "pending_review":
+        # Score dropped below the review band (or a gate now fails): the
+        # old queue entry is STALE — a human must never approve off it.
+        # Withdraw it and return the wallet to the automatic rescan pool.
+        wallet.approval_state = "discovered"
+        open_entries = (
+            (
+                await session.execute(
+                    select(ApprovalQueueEntry).where(
+                        ApprovalQueueEntry.wallet_id == wallet.id,
+                        ApprovalQueueEntry.state == "pending",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for entry in open_entries:
+            entry.state = "withdrawn"
+            entry.decided_at = now
+            entry.reviewer = "scorer"
+    # insufficient_history / score_rejected / discovered on an already-
+    # discovered wallet → leave state as-is: the wallet stays in the
+    # automatic rescan pool, and "rejected" in approval_state is reserved
+    # for human decisions.
 
 
 async def score_wallet(
@@ -176,7 +201,7 @@ async def score_wallet(
             },
         )
     )
-    await _apply_verdict(session, wallet, result)
+    await _apply_verdict(session, wallet, result, now=now)
     await session.commit()
     logger.info(
         "wallet_scored",
