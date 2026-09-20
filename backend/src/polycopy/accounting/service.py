@@ -66,6 +66,9 @@ async def compute_wallet_accounting(
                 side=trade.side,
                 size=Decimal(str(trade.size)),
                 price=Decimal(str(trade.price)),
+                # USDC fee on the fill (0 today — Data API /trades carries
+                # no fee field — but subtracted the moment it exists).
+                fee=Decimal(str(trade.fee)) if trade.fee is not None else Decimal(0),
             )
         )
         winners[market.condition_id] = (
