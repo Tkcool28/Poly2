@@ -7,8 +7,11 @@ is the only truth):
   re-verdicted. Human decisions (``approved`` / ``rejected`` / ``disabled``)
   are never overridden by the scorer.
 * Verdict ``pending_review`` → wallet state + one open ApprovalQueueEntry.
-* Verdict ``rejected`` → wallet state (gate failures or <50 or hard reject).
-* Verdict ``discovered`` → stays discovered (not good enough yet).
+* Verdict ``insufficient_history`` → stays ``discovered``; automatically
+  rescored on future cycles. Lack of evidence is never terminal.
+* Verdict ``score_rejected`` → stays ``discovered`` too: machine verdicts
+  live in WalletScore + the decision log. ``approval_state = rejected``
+  is reserved for HUMAN decisions only.
 * Every scoring run writes a WalletScore row (the full component breakdown
   lives in ``behavioral_tags`` as JSON — the "why is this score 63?" answer)
   and a DecisionLogEntry.
@@ -19,7 +22,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.accounting.service import compute_wallet_accounting
@@ -28,7 +31,6 @@ from polycopy.models import (
     ApprovalQueueEntry,
     DecisionLogEntry,
     Market,
-    Settlement,
     Trade,
     Wallet,
     WalletScore,
@@ -50,26 +52,34 @@ async def build_wallet_stats(
     acct = await compute_wallet_accounting(session, wallet)
     summary = acct.summary
 
-    # Settlement timestamps per market (for weekly consistency + recency).
-    settled_rows = (
-        await session.execute(
-            select(Market.condition_id, Settlement.settled_at)
-            .join(Settlement, Settlement.market_id == Market.id)
-            .join(Trade, Trade.market_id == Market.id)
-            .where(Trade.wallet_id == wallet.id)
-            .distinct()
-        )
-    ).all()
-    settled_at_by_market = {cond: ts for cond, ts in settled_rows}
+    # DECISION timestamp per settled market = wallet's first trade in it.
+    # Resolution determines when a result becomes knowable; trade timing
+    # determines when the decision was made. Recency/consistency use the
+    # latter (review correction, 2026-09-20).
+    settled_condition_ids = [m.market_key for m in acct.markets if m.resolved]
+    decision_ts_by_market: dict[str, datetime] = {}
+    if settled_condition_ids:
+        rows = (
+            await session.execute(
+                select(Market.condition_id, func.min(Trade.traded_at))
+                .join(Trade, Trade.market_id == Market.id)
+                .where(
+                    Trade.wallet_id == wallet.id,
+                    Market.condition_id.in_(settled_condition_ids),
+                )
+                .group_by(Market.condition_id)
+            )
+        ).all()
+        decision_ts_by_market = {cond: _aware(ts) for cond, ts in rows}
 
     settled_pnl: list[tuple[datetime, Decimal]] = []
     per_market: list[Decimal] = []
     for m in acct.markets:
         if m.resolved and m.realized_pnl is not None:
             per_market.append(m.realized_pnl)
-            ts = settled_at_by_market.get(m.market_key)
+            ts = decision_ts_by_market.get(m.market_key)
             if ts is not None:
-                settled_pnl.append((_aware(ts), m.realized_pnl))
+                settled_pnl.append((ts, m.realized_pnl))
 
     bounds = (
         await session.execute(
@@ -114,9 +124,9 @@ async def _apply_verdict(
         ).scalar_one_or_none()
         if open_entry is None:
             session.add(ApprovalQueueEntry(wallet_id=wallet.id, state="pending"))
-    elif result.verdict == "rejected":
-        wallet.approval_state = "rejected"
-    # "discovered" verdict → leave state as-is.
+    # insufficient_history / score_rejected / discovered → leave state
+    # as-is: the wallet stays in the automatic rescan pool, and
+    # "rejected" in approval_state is reserved for human decisions.
 
 
 async def score_wallet(
