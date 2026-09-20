@@ -8,19 +8,21 @@ Polymarket API ──> Trade Ingestion ──> PostgreSQL ──> Scoring Engine
 Dashboard (React) <── nginx <── FastAPI <── Tailing Bot <── approved wallets only
 ```
 
-## Chunk 1 (current)
+## Chunk 2 (current)
 
-All services run and health-check; data stores are migrated but empty.
-The bot process starts, logs its safe state, and idles — by design.
+Ingestion, accounting, scoring, and approval are live in paper mode. The
+bot daemon runs a bounded cycle every `ingestion_poll_interval_seconds`:
+ingest → detect signals from approved wallets → simulate fills against the
+detection-time order book → heartbeat. No live trading paths exist.
 
 ## Services
 
-| Service | Role | Chunk 1 behavior |
+| Service | Role | Chunk 2 behavior |
 |---|---|---|
 | `postgres` | System of record | Schema applied via Alembic `migrate` job |
-| `redis` | Signal buffer / dedup (Chunk 2) | Running, health-checked |
-| `backend` | FastAPI | `/health`, `/health/deps`, `/system/status`, `/config`, empty `/wallets`, `/signals` |
-| `bot` | Tailing daemon | Skeleton: starts, logs, idles. No ingestion, no execution |
+| `redis` | Signal buffer / dedup (future) | Running, health-checked |
+| `backend` | FastAPI | `/health`, `/system/status`, `/config`, `/wallets`, `/signals`, `/approval-queue`, score + approve/reject/disable endpoints |
+| `bot` | Tailing daemon | Poll → ingest → signal → paper fill loop; paper only, kill-switch gated |
 | `frontend` | React dashboard | Shell pages + live safety banner from `/system/status` |
 | `nginx` | Reverse proxy | `/api/*` → backend, everything else → frontend |
 | `migrate` | One-shot Alembic job | Runs `alembic upgrade head` before backend starts |
@@ -38,6 +40,8 @@ Key constraints baked into the schema:
   `docs/source-identity-contract.md` (written before ingestion ships).
 - `paper_orders.idempotency_key` UNIQUE — duplicate submissions replay, never
   double-execute.
+- `signals.source_trade_id` UNIQUE — a source trade produces at most one
+  signal, ever (PR-E).
 - `settlements.market_id` UNIQUE — a market settles exactly once.
 - `wallets.address` UNIQUE — canonical (lowercase) address normalization.
 - `markets.clob_token_ids` / `trades.asset_id` — the tradable identity on
