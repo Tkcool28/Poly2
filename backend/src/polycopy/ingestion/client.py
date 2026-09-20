@@ -8,13 +8,14 @@ One client instance owns:
 * retry-with-backoff on 429 / 5xx / transport errors (bounded attempts);
 * response parsing for known API quirks, notably Gamma's ``clobTokenIds``
   and ``outcomes`` fields, which the probe verified are JSON-ENCODED
-  STRINGS (e.g. ``"[\\"4667...\\", \\"8761...\\"]"``), not native arrays.
+  STRINGS (e.g. ``"[\"4667...\", \"8761...\"]"``), not native arrays.
 
 Endpoints (all verified by the source-identity probe, 2026-09-19):
 * Data API ``GET /trades?user=`` — trade history for a wallet
 * Data API ``GET /positions?user=`` — position reconciliation
 * Gamma API ``GET /markets?condition_ids=`` — market metadata + token map
 * CLOB API ``GET /markets/{condition_id}`` — token map fallback
+* CLOB API ``GET /book?token_id=`` — order book for paper fills (PR-E)
 """
 
 from __future__ import annotations
@@ -153,6 +154,15 @@ class PolymarketClient:
     async def get_clob_market(self, condition_id: str) -> dict[str, Any]:
         """CLOB market object (token mapping fallback)."""
         return await self._get(f"{CLOB_API_BASE}/markets/{condition_id}")
+
+    async def get_order_book(self, token_id: str) -> dict[str, Any]:
+        """CLOB order book for one token: {"bids": [...], "asks": [...]}.
+
+        Each level is {"price": "0.52", "size": "123.4"}. One request per
+        signal at decision time — this is what realistic paper fills are
+        priced against (docs/paper-execution-model.md).
+        """
+        return await self._get(f"{CLOB_API_BASE}/book", params={"token_id": token_id})
 
 
 def clob_token_map(gamma_market: dict[str, Any]) -> dict[str, str]:
