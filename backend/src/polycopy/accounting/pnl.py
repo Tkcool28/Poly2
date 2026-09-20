@@ -2,9 +2,12 @@
 
 Method (deliberately the simplest correct thing):
 
-* BUY  ``size`` shares at ``price`` → cash flow ``-size * price``
-* SELL ``size`` shares at ``price`` → cash flow ``+size * price``
+* BUY  ``size`` shares at ``price`` → cash flow ``-size * price - fee``
+* SELL ``size`` shares at ``price`` → cash flow ``+size * price - fee``
 * At settlement, each share of the winning outcome still held pays $1.
+
+``fee`` is the USDC fee charged on that fill (``trades.fee``). It is
+subtracted from cash flow on BOTH sides — a fee is money out, always.
 
 Realized P&L is only ever computed for RESOLVED markets. Unresolved
 markets are reported as open positions (share counts), never as P&L —
@@ -28,6 +31,11 @@ class TradeLeg:
     side: str  # "BUY" | "SELL"
     size: Decimal
     price: Decimal
+    # USDC fee charged on this fill. The Data API /trades response carries
+    # no fee field (probe-audited field list, 2026-09-19), so ingested
+    # trades have fee=0 today — but accounting must subtract it the moment
+    # fees exist, or realized P&L silently overstates.
+    fee: Decimal = Decimal(0)
 
 
 @dataclass
@@ -74,7 +82,8 @@ def account_market(
         pos = result.positions.setdefault(leg.outcome, MarketPosition())
         signed = leg.size if leg.side == "BUY" else -leg.size
         pos.shares += signed
-        pos.cash_flow += -leg.size * leg.price if leg.side == "BUY" else leg.size * leg.price
+        gross = -leg.size * leg.price if leg.side == "BUY" else leg.size * leg.price
+        pos.cash_flow += gross - leg.fee  # fees are always money out
 
     if winning_outcome is not None:
         win_pos = result.positions.get(winning_outcome)

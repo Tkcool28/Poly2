@@ -33,7 +33,10 @@ def utcnow() -> datetime:
 
 
 # Wallet approval state machine: the single source of truth.
-# discovered -> pending_review -> approved | rejected; approved -> disabled
+# discovered -> pending_review -> approved | rejected; approved -> disabled.
+# "rejected" is HUMAN-only (set via the API): the scorer's machine verdicts
+# (insufficient_history / score_rejected) live in WalletScore rows and the
+# decision log, never here — so auto-scored wallets always stay rescannable.
 WALLET_STATES = ("discovered", "pending_review", "approved", "rejected", "disabled")
 
 

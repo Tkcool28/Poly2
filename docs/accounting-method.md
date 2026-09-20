@@ -10,11 +10,21 @@ For each wallet × market, using only ingested trades:
 
 | Event | Cash flow |
 |---|---|
-| BUY `s` shares @ `p` | `−s × p` |
-| SELL `s` shares @ `p` | `+s × p` |
+| BUY `s` shares @ `p`, fee `f` | `−s × p − f` |
+| SELL `s` shares @ `p`, fee `f` | `+s × p − f` |
 | Market resolves, winning shares held | `+1 per share` |
 
 **Realized P&L (resolved market) = total cash flows + payout.**
+
+Fees are always money out, on both sides. **Fee semantics (verified,
+2026-09-20):** `trades.fee` is the USDC fee charged on that fill. The
+probe-audited Data API `/trades` field list
+(`docs/source-identity-contract.md`) contains **no fee field**, so all
+ingested trades carry `fee = 0` today. The column exists so the moment
+fees appear in the source data — or Polymarket changes its fee model —
+accounting is already correct. Scoring therefore always sees
+fee-adjusted numbers; the positive-P&L eligibility gate is tested with a
+wallet that is profitable before fees and losing after them.
 
 Deliberate choices:
 
