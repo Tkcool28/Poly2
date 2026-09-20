@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.db import get_db
@@ -29,6 +29,14 @@ _ALLOWED_TRANSITIONS = {
     "approve": ("pending_review", "approved"),
     "reject": ("pending_review", "rejected"),
     "disable": ("approved", "disabled"),
+}
+
+# Explicit decision-log action names — never derive verbs by string
+# inflection ("reject" + "d" is how you get "wallet_rejectd").
+_ACTION_LOG_NAMES = {
+    "approve": "wallet_approved",
+    "reject": "wallet_rejected",
+    "disable": "wallet_disabled",
 }
 
 
@@ -98,24 +106,43 @@ async def list_approval_queue(db: AsyncSession = Depends(get_db)) -> dict:
 async def transition_wallet(
     wallet_id: int, action: str, db: AsyncSession = Depends(get_db)
 ) -> dict:
-    """Human decision: approve / reject / disable a wallet."""
+    """Human decision: approve / reject / disable a wallet.
+
+    The state transition is a single conditional UPDATE: the required
+    source state is part of the WHERE clause, so two concurrent requests
+    cannot both succeed — exactly one row matches, the loser gets 409.
+    """
     if action not in _ALLOWED_TRANSITIONS:
         raise HTTPException(status_code=404, detail="unknown action")
     required_from, target = _ALLOWED_TRANSITIONS[action]
 
-    wallet = await db.get(Wallet, wallet_id)
-    if wallet is None:
-        raise HTTPException(status_code=404, detail="wallet not found")
-    if wallet.approval_state != required_from:
+    result = await db.execute(
+        update(Wallet)
+        .where(Wallet.id == wallet_id, Wallet.approval_state == required_from)
+        .values(approval_state=target)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount == 0:
+        # Either no such wallet, or it isn't in the required source state
+        # (possibly because a concurrent request just moved it).
+        current = (
+            await db.execute(select(Wallet).where(Wallet.id == wallet_id))
+        ).scalar_one_or_none()
+        if current is None:
+            raise HTTPException(status_code=404, detail="wallet not found")
+        await db.refresh(current)  # report the true current state, not a stale copy
         raise HTTPException(
             status_code=409,
             detail=(
-                f"cannot {action} from state '{wallet.approval_state}' "
+                f"cannot {action} from state '{current.approval_state}' "
                 f"(requires '{required_from}')"
             ),
         )
 
-    wallet.approval_state = target
+    wallet = (
+        await db.execute(select(Wallet).where(Wallet.id == wallet_id))
+    ).scalar_one()
+    await db.refresh(wallet)  # bypass any identity-map-stale state
     entry = (
         await db.execute(
             select(ApprovalQueueEntry).where(
@@ -131,7 +158,7 @@ async def transition_wallet(
     db.add(
         DecisionLogEntry(
             actor="human:api",
-            action=f"wallet_{action}d" if action != "disable" else "wallet_disabled",
+            action=_ACTION_LOG_NAMES[action],
             context={"wallet": wallet.address, "from": required_from, "to": target},
         )
     )
