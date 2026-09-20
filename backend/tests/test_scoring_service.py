@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
@@ -48,10 +49,11 @@ async def _add_market_with_trades(
     size=10,
     price=0.50,
     n_trades=2,
+    fee=0,
 ):
     """One market + trades. winner=None → open market.
 
-    BUY size @ 0.50, "Up" wins → +size/2 realized per market (10 → +5).
+    2× BUY 10 @ 0.50, "Up" wins → +10 realized per market (−10 + 20).
     """
     market = Market(
         condition_id=key,
@@ -80,12 +82,13 @@ async def _add_market_with_trades(
                 outcome="Up",
                 size=size,
                 price=price,
+                fee=fee,
                 traded_at=decided_at + timedelta(hours=j),
             )
         )
 
 
-async def _seed_strong_wallet(session, address="0xstrong", settled_count=16):
+async def _seed_strong_wallet(session, address="0xstrong", settled_count=16, fee=0):
     """Eligible: settled markets decided 20–35d ago (age gate OK, most
     inside the 30d recency window), active yesterday, diversified wins."""
     wallet = Wallet(address=address, approval_state="discovered")
@@ -94,7 +97,7 @@ async def _seed_strong_wallet(session, address="0xstrong", settled_count=16):
     for i in range(settled_count):
         await _add_market_with_trades(
             session, wallet, f"m{i}{address}",
-            decided_at=NOW - timedelta(days=20 + i),
+            decided_at=NOW - timedelta(days=20 + i), fee=fee,
         )
     # one recent open-market trade → active now
     await _add_market_with_trades(
@@ -257,3 +260,83 @@ async def test_score_all_wallets_isolates_failures(session):
     assert results == {"0xstrong": "pending_review", "0xstrong2": "pending_review"}
     await session.refresh(approved)
     assert approved.approval_state == "approved"
+
+
+async def test_positive_before_fees_negative_after_fees_fails_gate():
+    """REVIEW REGRESSION: scoring must see FEE-ADJUSTED realized P&L.
+
+    16 settled markets, +10 pre-fee each = +160 realized before fees.
+    Each market carries 2 trades × fee 6 = 12 → 192 total fees.
+    After fees: −32 → the non-positive-P&L evidence gate must reject.
+    """
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as s:
+        wallet = await _seed_strong_wallet(s, fee=6)
+
+        from polycopy.accounting.service import compute_accounting
+        acct = await compute_accounting(s, wallet)
+        assert acct.summary["realized_pnl"] == Decimal(-32)  # +160 − 192
+
+        result = await score_wallet(s, wallet, now=NOW)
+        assert result.verdict == "score_rejected"
+        assert any("pnl" in f.lower() for f in result.gate_failures)
+    await engine.dispose()
+
+
+async def test_pending_review_downgraded_to_discovered_withdraws_queue(session):
+    """REVIEW REGRESSION: 76 → pending_review → 62 → removed from queue.
+
+    Score now (pending_review), then rescore 10 days later: recency decays
+    enough to drop the composite below 70 (no gate fails, dormancy is at
+    14d so 10d is safe) → verdict discovered → wallet returns to
+    discovered and the stale queue entry is withdrawn.
+    """
+    wallet = await _seed_strong_wallet(session)
+    first = await score_wallet(session, wallet, now=NOW)
+    assert first.verdict == "pending_review"
+    await session.refresh(wallet)
+    assert wallet.approval_state == "pending_review"
+
+    later = NOW + timedelta(days=10)
+    second = await score_wallet(session, wallet, now=later)
+    assert second.eligible is True
+    assert second.composite_score < 70
+    assert second.verdict == "discovered"
+
+    await session.refresh(wallet)
+    assert wallet.approval_state == "discovered"  # back in the rescan pool
+
+    entry = (await session.execute(select(ApprovalQueueEntry))).scalar_one()
+    assert entry.state == "withdrawn"
+    assert entry.decided_at is not None
+    pending = await session.scalar(
+        select(func.count(ApprovalQueueEntry.id)).where(
+            ApprovalQueueEntry.state == "pending"
+        )
+    )
+    assert pending == 0
+
+
+async def test_pending_review_to_score_rejected_withdraws_queue(session):
+    """REVIEW REGRESSION: 76 → pending_review → score_rejected → removed.
+
+    Rescore 20 days later: last trade is now 21 days old → dormant
+    evidence gate → score_rejected → stale queue entry withdrawn.
+    """
+    wallet = await _seed_strong_wallet(session)
+    first = await score_wallet(session, wallet, now=NOW)
+    assert first.verdict == "pending_review"
+
+    later = NOW + timedelta(days=20)
+    second = await score_wallet(session, wallet, now=later)
+    assert second.verdict == "score_rejected"
+
+    await session.refresh(wallet)
+    assert wallet.approval_state == "discovered"  # machine never writes "rejected"
+
+    entry = (await session.execute(select(ApprovalQueueEntry))).scalar_one()
+    assert entry.state == "withdrawn"
+    assert entry.decided_at is not None
