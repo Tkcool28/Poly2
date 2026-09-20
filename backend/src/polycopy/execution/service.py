@@ -55,8 +55,10 @@ def _parse_levels(raw_levels: list[dict[str, Any]] | None) -> list[BookLevel]:
 async def detect_signals(session: AsyncSession, *, now: datetime | None = None) -> int:
     """Turn new approved-wallet trades into signals. Idempotent.
 
-    A trade gets a signal iff its wallet is currently ``approved`` and no
-    signal with that source_trade_id exists yet. t1 (detection) is now —
+    A trade gets a signal iff its wallet is currently ``approved``, the
+    trade was INGESTED at/after the wallet's ``approved_at`` boundary
+    (pre-approval trades are history, never copyable — PR #7 review), and
+    no signal with that source_trade_id exists yet. t1 (detection) is now —
     the honest timestamp of when we saw it.
     """
     now = now or datetime.now(UTC)
@@ -66,6 +68,8 @@ async def detect_signals(session: AsyncSession, *, now: datetime | None = None) 
             .join(Wallet, Trade.wallet_id == Wallet.id)
             .where(
                 Wallet.approval_state == "approved",
+                Wallet.approved_at.is_not(None),
+                Trade.ingested_at >= Wallet.approved_at,
                 Trade.polymarket_trade_id.not_in(
                     select(Signal.source_trade_id)
                 ),
@@ -158,13 +162,6 @@ async def execute_signal(
                                    order_kwargs={})
         await session.commit()
         return order
-    if signal.source_price is not None and Decimal(str(signal.source_price)) >= Decimal(
-        str(settings.max_copy_price)
-    ):
-        order = await _record_skip(session, signal, reason="price_zone", now=now,
-                                   order_kwargs={})
-        await session.commit()
-        return order
 
     token_id = (market.clob_token_ids or {}).get(signal.outcome)
     if not token_id:
@@ -172,6 +169,26 @@ async def execute_signal(
                                    now=now, order_kwargs={})
         await session.commit()
         return order
+
+    # SELL: never sell more paper shares than we own (no synthetic shorts).
+    # Zero position → missed. Smaller position → cap the walk at owned qty
+    # so filled_size and the position change always agree (PR #7 review).
+    owned: Decimal | None = None
+    if signal.side == "SELL":
+        position = (
+            await session.execute(
+                select(Position).where(
+                    Position.market_id == signal.market_id,
+                    Position.outcome == signal.outcome,
+                )
+            )
+        ).scalar_one_or_none()
+        owned = Decimal(str(position.quantity)) if position is not None else Decimal(0)
+        if owned <= 0:
+            order = await _record_skip(session, signal, reason="no_position_to_sell",
+                                       now=now, order_kwargs={})
+            await session.commit()
+            return order
 
     # Exposure caps (BUYs only — a SELL reduces exposure). Exposure is
     # priced at cost basis: sum(quantity × avg_price) across positions.
@@ -204,10 +221,25 @@ async def execute_signal(
         "asks": [[str(lv.price), str(lv.size)] for lv in asks],
     }
 
-    result, fee = walk_book(signal.side, size_usd, bids, asks, fee_rate=fee_rate)
+    result, fee = walk_book(
+        signal.side, size_usd, bids, asks, fee_rate=fee_rate, max_shares=owned
+    )
     if result.status == "missed":
         order = await _record_skip(session, signal, reason="no_book_depth", now=now,
                                    order_kwargs={"book_snapshot": snapshot})
+        await session.commit()
+        return order
+
+    # Price-zone gate on OUR detection-time execution price (VWAP), never
+    # the source wallet's price (PR #7 review): a source trade at 0.82 that
+    # is now 0.95 must be missed; a source trade at 0.92 whose execution
+    # price is below the cap must fill. Entries only — a SELL at a high
+    # price is good, not gated.
+    if signal.side == "BUY" and result.fill_price >= Decimal(str(settings.max_copy_price)):
+        order = await _record_skip(
+            session, signal, reason="price_zone", now=now,
+            order_kwargs={"book_snapshot": snapshot},
+        )
         await session.commit()
         return order
 
@@ -272,7 +304,7 @@ async def execute_signal(
                 "fill_price": str(result.fill_price),
                 "source_price": str(signal.source_price),
                 "filled_size": str(result.filled_size),
-                "depth_consumed": str(result.depth_consumed),
+                "depth_available": str(result.depth_available),
                 "levels_consumed": result.levels_consumed,
                 "fee": str(fee),
             },
