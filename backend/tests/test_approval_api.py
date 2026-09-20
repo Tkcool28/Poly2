@@ -118,3 +118,73 @@ async def test_unknown_action_and_wallet(client, session):
     wallet = await _queue_wallet(session)
     assert client.post(f"/wallets/{wallet.id}/explode").status_code == 404
     assert client.post("/wallets/99999/approve").status_code == 404
+
+
+async def test_conflicting_concurrent_decisions_exactly_one_succeeds():
+    """REVIEW REGRESSION: two operators acting on the same stale view.
+
+    Both sessions observe the wallet as pending_review (the old race
+    window in the read-then-write version), then both submit a decision.
+    The transition is a conditional UPDATE (source state in the WHERE
+    clause), so exactly one succeeds and the other gets 409.
+    """
+    from sqlalchemy.pool import StaticPool
+
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///:memory:",
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with maker() as seed:
+        wallet = Wallet(address="0xracy", approval_state="pending_review")
+        seed.add(wallet)
+        await seed.flush()
+        seed.add(ApprovalQueueEntry(wallet_id=wallet.id, state="pending"))
+        await seed.commit()
+        wallet_id = wallet.id
+
+    s1 = maker()
+    s2 = maker()
+    # Both observe the pre-decision state — this is the race window.
+    assert (await s1.get(Wallet, wallet_id)).approval_state == "pending_review"
+    assert (await s2.get(Wallet, wallet_id)).approval_state == "pending_review"
+
+    responses = []
+    for s in (s1, s2):
+        # Factory, not a default arg: FastAPI inspects override signatures
+        # and would try to deepcopy an AsyncSession default.
+        def make_override(session=s):
+            async def override_get_db():
+                yield session
+            return override_get_db
+        app.dependency_overrides[get_db] = make_override()
+        with TestClient(app) as c:
+            responses.append(c.post(f"/wallets/{wallet_id}/approve"))
+    app.dependency_overrides.clear()
+
+    assert sorted([r.status_code for r in responses]) == [200, 409]
+
+    async with maker() as check:
+        wallet = await check.get(Wallet, wallet_id)
+        assert wallet.approval_state == "approved"
+        logs = (
+            (await check.execute(select(DecisionLogEntry))).scalars().all()
+        )
+        assert len([log for log in logs if log.action == "wallet_approved"]) == 1
+    await s1.close()
+    await s2.close()
+    await engine.dispose()
+
+
+async def test_decision_log_action_names_are_explicit(client, session):
+    """The reject log entry is 'wallet_rejected', never 'wallet_rejectd'."""
+    wallet = await _queue_wallet(session)
+    resp = client.post(f"/wallets/{wallet.id}/reject")
+    assert resp.status_code == 200
+    logs = (await session.execute(select(DecisionLogEntry))).scalars().all()
+    assert any(log.action == "wallet_rejected" for log in logs)
+    assert not any(log.action == "wallet_rejectd" for log in logs)
