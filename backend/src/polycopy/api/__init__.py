@@ -1,1 +1,1 @@
-"""API package marker. Routers live in polycopy.main for Chunk 1."""
+"""API package — FastAPI routers live here (main.py wires them in)."""
