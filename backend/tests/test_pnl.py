@@ -83,3 +83,41 @@ def test_no_float_drift_in_money_math():
     m = account_market("0xm1", legs, winning_outcome="Up")
     # cost 0.3, payout 2 → +1.7 exactly
     assert m.realized_pnl == Decimal("1.7")
+
+
+def test_fees_are_subtracted_from_cash_flow():
+    # Buy 10 Up @ 0.60 with a $0.50 fee → cost 6.50; Up wins → payout 10
+    # Fee-adjusted P&L = 10 − 6.50 = +3.50 (not +4.00)
+    m = account_market(
+        "0xm1",
+        [
+            TradeLeg(
+                market_key="0xm1",
+                outcome="Up",
+                side="BUY",
+                size=Decimal(10),
+                price=Decimal("0.60"),
+                fee=Decimal("0.50"),
+            )
+        ],
+        winning_outcome="Up",
+    )
+    assert m.realized_pnl == Decimal("3.50")
+
+
+def test_fees_apply_to_sells_too():
+    # Buy 10 @ 0.50 fee 0.10, sell 10 @ 0.80 fee 0.10 → +2.80 not +3.00
+    legs = [
+        TradeLeg(market_key="0xm1", outcome="Up", side="BUY",
+                 size=Decimal(10), price=Decimal("0.50"), fee=Decimal("0.10")),
+        TradeLeg(market_key="0xm1", outcome="Up", side="SELL",
+                 size=Decimal(10), price=Decimal("0.80"), fee=Decimal("0.10")),
+    ]
+    m = account_market("0xm1", legs, winning_outcome="Down")
+    assert m.realized_pnl == Decimal("2.80")
+
+
+def test_zero_fee_default_is_a_no_op():
+    # Existing callers that never set a fee must see identical numbers.
+    m = account_market("0xm1", [leg()], winning_outcome="Up")
+    assert m.realized_pnl == Decimal("4.00")
