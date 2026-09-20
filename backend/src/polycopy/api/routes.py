@@ -75,7 +75,7 @@ async def get_wallet_score(
 
 
 @router.get("/approval-queue")
-async def list_approval_queue(db: AsyncSession) -> dict:
+async def list_approval_queue(db: AsyncSession = Depends(get_db)) -> dict:
     """Pending approvals: wallets the scorer flagged ≥70 awaiting a human."""
     rows = (
         await db.execute(
