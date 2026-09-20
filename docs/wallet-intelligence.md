@@ -80,6 +80,12 @@ Verdicts: ≥70 → `pending_review` (human approves) · 50–69 → stays
 rescan pool). Thresholds are provisional and untuned — tuning comes from
 prospective paper evidence (§6), never retrospective optimization.
 
+**Stale queue entries are withdrawn automatically** (review correction,
+2026-09-20): if a wallet in `pending_review` is rescored and the new
+verdict is `discovered`, `score_rejected`, or `insufficient_history`,
+its approval state returns to `discovered` and the open queue entry is
+closed as `withdrawn`. A human must never approve off an outdated score.
+
 No Kelly criterion, no Sharpe ratio, no behavioral clustering in V1. Those are
 add-later candidates, added only when paper evidence shows a specific weakness.
 
