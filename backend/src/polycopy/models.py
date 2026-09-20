@@ -52,6 +52,10 @@ class Wallet(Base):
     label: Mapped[str | None] = mapped_column(String(120))
     # Single source of truth for approval. No parallel boolean.
     approval_state: Mapped[str] = mapped_column(String(20), default="discovered")
+    # Copy-enabled boundary (PR #7 review): set when a human approves the
+    # wallet. Only trades INGESTED at/after this moment may become signals —
+    # pre-approval trades are history, never copyable.
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -219,7 +223,8 @@ class PaperOrder(Base):
     # Raw detection-time book ({"bids": [[price, size], ...], "asks": ...}).
     book_snapshot: Mapped[dict | None] = mapped_column(JSON)
     # Why status == "missed" (e.g. "no_book_depth", "market_closed",
-    # "kill_switch", "no_token_for_outcome", "exposure_cap").
+    # "kill_switch", "no_token_for_outcome", "exposure_cap",
+    # "no_position_to_sell", "price_zone").
     miss_reason: Mapped[str | None] = mapped_column(String(60))
 
 
