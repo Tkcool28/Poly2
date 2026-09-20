@@ -8,7 +8,7 @@ One client instance owns:
 * retry-with-backoff on 429 / 5xx / transport errors (bounded attempts);
 * response parsing for known API quirks, notably Gamma's ``clobTokenIds``
   and ``outcomes`` fields, which the probe verified are JSON-ENCODED
-  STRINGS (e.g. ``"[\"4667...\", \"8761...\"]"``), not native arrays.
+  STRINGS (e.g. ``"[\\"4667...\\", \\"8761...\\"]"``), not native arrays.
 
 Endpoints (all verified by the source-identity probe, 2026-09-19):
 * Data API ``GET /trades?user=`` — trade history for a wallet
