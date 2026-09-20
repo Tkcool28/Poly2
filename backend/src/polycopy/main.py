@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from polycopy.api.routes import router as api_router
 from polycopy.config import Settings, get_settings
 from polycopy.db import dispose_engine, get_db
 from polycopy.logging_config import configure_logging, get_logger
@@ -39,6 +40,8 @@ app = FastAPI(
     description="Smart-wallet discovery and copy-trading for Polymarket. Paper-first, fail-closed.",
     lifespan=lifespan,
 )
+
+app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
