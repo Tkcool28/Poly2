@@ -53,10 +53,21 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # --- Risk limits (enforced by the bot in Chunk 2; surfaced now) ------
-    max_order_size_usd: float = 25.0
+    # V1 paper sizing: fixed USD per signal (TK decision, 2026-09-20).
+    # Evidence on every paper order (book snapshot, depth) exists so larger
+    # sizing can be evaluated later from real detection-time data.
+    max_order_size_usd: float = 10.0
     max_exposure_per_market_usd: float = 100.0
     max_exposure_global_usd: float = 500.0
     review_delay_seconds: float = 30.0
+
+    # --- Paper execution --------------------------------------------------
+    # Fee rate applied to paper fill notional (0.01 = 1%). Config, not a
+    # constant: if Polymarket's fee model changes, this changes with it.
+    paper_fee_rate: float = 0.0
+    # Entries at this price or higher are skipped (~10% max upside is not
+    # worth fees + slippage — docs/wallet-intelligence.md §5).
+    max_copy_price: float = 0.90
 
     # --- Ingestion bounds (Chunk 2; defined now so nobody forgets) -------
     ingestion_batch_size: int = 500
