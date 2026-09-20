@@ -75,7 +75,7 @@ async def get_wallet_score(
 
 
 @router.get("/approval-queue")
-async def list_approval_queue(db: AsyncSession = Depends(get_db)) -> dict:
+async def list_approval_queue(db: AsyncSession) -> dict:
     """Pending approvals: wallets the scorer flagged ≥70 awaiting a human."""
     rows = (
         await db.execute(
@@ -119,7 +119,12 @@ async def transition_wallet(
     result = await db.execute(
         update(Wallet)
         .where(Wallet.id == wallet_id, Wallet.approval_state == required_from)
-        .values(approval_state=target)
+        .values(
+            approval_state=target,
+            # approved_at is the copy-enabled boundary: only trades ingested
+            # after this moment may ever become signals (review fix, PR #7).
+            **({"approved_at": datetime.now(UTC)} if target == "approved" else {}),
+        )
         .execution_options(synchronize_session=False)
     )
     if result.rowcount == 0:
