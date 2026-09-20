@@ -48,8 +48,8 @@ async def _add_market_with_trades(
     settled_at: datetime | None = None,
     size=10,
     price=0.50,
-    n_trades=2,
     fee=0,
+    n_trades=2,
 ):
     """One market + trades. winner=None → open market.
 
@@ -263,80 +263,97 @@ async def test_score_all_wallets_isolates_failures(session):
 
 
 async def test_positive_before_fees_negative_after_fees_fails_gate():
-    """REVIEW REGRESSION: scoring must see FEE-ADJUSTED realized P&L.
+    """REVIEW REGRESSION: scoring must see FEE-ADJUSTED P&L.
 
-    16 settled markets, +10 pre-fee each = +160 realized before fees.
-    Each market carries 2 trades × fee 6 = 12 → 192 total fees.
-    After fees: −32 → the non-positive-P&L evidence gate must reject.
+    16 settled markets, each: 2× BUY 10 @ 0.50, "Up" wins.
+    Before fees: +10 per market → +160 total (would pass the P&L gate).
+    With $6 fee per fill: +160 − (32 fills × $6) = −32 → gate must fail.
     """
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with maker() as s:
-        wallet = await _seed_strong_wallet(s, fee=6)
+    async with maker() as session:
+        wallet = await _seed_strong_wallet(session, fee=6)
 
-        from polycopy.accounting.service import compute_accounting
-        acct = await compute_accounting(s, wallet)
+        from polycopy.accounting.service import compute_wallet_accounting
+        acct = await compute_wallet_accounting(session, wallet)
         assert acct.summary["realized_pnl"] == Decimal(-32)  # +160 − 192
 
-        result = await score_wallet(s, wallet, now=NOW)
+        result = await score_wallet(session, wallet, now=NOW)
         assert result.verdict == "score_rejected"
         assert any("pnl" in f.lower() for f in result.gate_failures)
     await engine.dispose()
 
 
-async def test_pending_review_downgraded_to_discovered_withdraws_queue(session):
+async def test_pending_review_downgraded_to_discovered_withdraws_queue():
     """REVIEW REGRESSION: 76 → pending_review → 62 → removed from queue.
 
-    Score now (pending_review), then rescore 10 days later: recency decays
-    enough to drop the composite below 70 (no gate fails, dormancy is at
-    14d so 10d is safe) → verdict discovered → wallet returns to
-    discovered and the stale queue entry is withdrawn.
+    Rescoring 10 days later: every settled decision falls out of the 30d
+    recency window (recency ≈ 0), the composite drops below 70 — but the
+    wallet is still active (11 days), so the verdict is `discovered`.
+    The stale queue entry must be withdrawn, not left approvable.
     """
-    wallet = await _seed_strong_wallet(session)
-    first = await score_wallet(session, wallet, now=NOW)
-    assert first.verdict == "pending_review"
-    await session.refresh(wallet)
-    assert wallet.approval_state == "pending_review"
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as session:
+        wallet = await _seed_strong_wallet(session)
 
-    later = NOW + timedelta(days=10)
-    second = await score_wallet(session, wallet, now=later)
-    assert second.eligible is True
-    assert second.composite_score < 70
-    assert second.verdict == "discovered"
+        first = await score_wallet(session, wallet, now=NOW)
+        assert first.verdict == "pending_review"
+        assert wallet.approval_state == "pending_review"
+        assert first.composite >= 70
 
-    await session.refresh(wallet)
-    assert wallet.approval_state == "discovered"  # back in the rescan pool
+        later = await score_wallet(session, wallet, now=NOW + timedelta(days=10))
+        assert later.eligible is True
+        assert later.composite < 70
+        assert later.verdict == "discovered"
 
-    entry = (await session.execute(select(ApprovalQueueEntry))).scalar_one()
-    assert entry.state == "withdrawn"
-    assert entry.decided_at is not None
-    pending = await session.scalar(
-        select(func.count(ApprovalQueueEntry.id)).where(
-            ApprovalQueueEntry.state == "pending"
+        await session.refresh(wallet)
+        assert wallet.approval_state == "discovered"  # back in rescan pool
+        entries = (
+            (await session.execute(select(ApprovalQueueEntry))).scalars().all()
         )
-    )
-    assert pending == 0
+        assert len(entries) == 1
+        assert entries[0].state == "withdrawn"
+        assert entries[0].decided_at is not None
+
+        # The queue endpoint's contract: nothing pending remains.
+        pending = (
+            await session.execute(
+                select(ApprovalQueueEntry).where(
+                    ApprovalQueueEntry.state == "pending"
+                )
+            )
+        ).scalars().all()
+        assert pending == []
+    await engine.dispose()
 
 
-async def test_pending_review_to_score_rejected_withdraws_queue(session):
-    """REVIEW REGRESSION: 76 → pending_review → score_rejected → removed.
+async def test_pending_review_to_score_rejected_withdraws_queue():
+    """REVIEW REGRESSION: 76 → pending_review → score_rejected → withdrawn.
 
-    Rescore 20 days later: last trade is now 21 days old → dormant
-    evidence gate → score_rejected → stale queue entry withdrawn.
+    Rescoring 20 days later: last trade is 21 days old → dormant evidence
+    gate → score_rejected. The stale queue entry must still be withdrawn.
     """
-    wallet = await _seed_strong_wallet(session)
-    first = await score_wallet(session, wallet, now=NOW)
-    assert first.verdict == "pending_review"
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as session:
+        wallet = await _seed_strong_wallet(session)
 
-    later = NOW + timedelta(days=20)
-    second = await score_wallet(session, wallet, now=later)
-    assert second.verdict == "score_rejected"
+        first = await score_wallet(session, wallet, now=NOW)
+        assert first.verdict == "pending_review"
 
-    await session.refresh(wallet)
-    assert wallet.approval_state == "discovered"  # machine never writes "rejected"
+        later = await score_wallet(session, wallet, now=NOW + timedelta(days=20))
+        assert later.verdict == "score_rejected"
+        assert any("inactive" in f for f in later.gate_failures)
 
-    entry = (await session.execute(select(ApprovalQueueEntry))).scalar_one()
-    assert entry.state == "withdrawn"
-    assert entry.decided_at is not None
+        await session.refresh(wallet)
+        assert wallet.approval_state == "discovered"  # machine never writes "rejected"
+        entry = (await session.execute(select(ApprovalQueueEntry))).scalar_one()
+        assert entry.state == "withdrawn"
+    await engine.dispose()
