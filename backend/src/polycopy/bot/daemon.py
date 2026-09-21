@@ -1,14 +1,24 @@
-"""Tailing bot daemon — ingestion → signal detection → paper execution.
+"""Tailing bot daemon — ingestion → settlement → detection → paper execution.
 
 One cycle per ``ingestion_poll_interval_seconds``:
 
 1. ingest a bounded batch of trades for every tracked wallet;
-2. turn new approved-wallet trades into signals (idempotent);
-3. simulate each pending signal against the detection-time order book.
+2. refresh settlements (check tracked open markets for resolution);
+3. settle paper positions on newly resolved markets ($1 / $0), detect
+   new signals, and execute eligible ones against the detection-time
+   order book — all inside ``run_execution_cycle``.
+
+Runtime ownership (Chunk 2 autonomous path): THIS daemon owns ingestion,
+settlement refresh, signal detection, paper execution, and paper
+settlement. ``score_all_wallets`` is owned by the API (scoring is
+human-review-driven, not trading-critical) — see docs/architecture.md.
+Candidate-wallet DISCOVERY is intentionally outside Chunk 2: wallets are
+seeded/added explicitly, then scored, reviewed, and approved by a human.
 
 Everything is paper. Live trading is impossible here: the Settings
 validator refuses a private key unless POLYCOPY_ALLOW_LIVE_TRADING=true,
-and the kill switch blocks even paper order creation when on.
+execution.service refuses to run in any non-paper mode, and the kill
+switch defers even paper execution when on.
 """
 
 from __future__ import annotations
@@ -17,6 +27,7 @@ import asyncio
 import signal
 from datetime import UTC, datetime
 
+from polycopy.accounting.settlements import refresh_settlements
 from polycopy.config import get_settings
 from polycopy.db import get_sessionmaker
 from polycopy.execution.service import run_execution_cycle
@@ -51,12 +62,16 @@ async def run() -> None:
             try:
                 async with maker() as session:
                     ingest = await run_ingestion_cycle(session, client)
+                    settle = await refresh_settlements(session, client)
                     exec_stats = await run_execution_cycle(session, client)
                     session.add(
                         ServiceHeartbeat(service="bot", seen_at=datetime.now(UTC))
                     )
                     await session.commit()
-                logger.info("bot_cycle", ingest=ingest, execution=exec_stats)
+                logger.info(
+                    "bot_cycle", ingest=ingest, settlements=settle,
+                    execution=exec_stats,
+                )
             except Exception:
                 logger.exception("bot_cycle_failed")
 

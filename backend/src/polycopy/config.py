@@ -59,7 +59,14 @@ class Settings(BaseSettings):
     max_order_size_usd: float = 10.0
     max_exposure_per_market_usd: float = 100.0
     max_exposure_global_usd: float = 500.0
+    # A signal is not eligible to execute until t1_detected_at + this many
+    # seconds. Detection/decision evidence reflects the configured delay.
     review_delay_seconds: float = 30.0
+    # Per-cycle bounds (PR #7 hardening): one cycle never exceeds this many
+    # new signals / book requests, so a backlogged DB can never turn into
+    # an unbounded execution storm (the VPS OOM lesson).
+    signal_detection_batch_size: int = 200
+    execution_batch_size: int = 50
 
     # --- Paper execution --------------------------------------------------
     # Fee rate applied to paper fill notional (0.01 = 1%). Config, not a
