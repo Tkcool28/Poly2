@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.api.routes import router as api_router
@@ -282,17 +282,42 @@ async def list_positions(db: AsyncSession = Depends(get_db)) -> dict:
             "avg_price": float(p.avg_price),
             "realized_pnl": float(p.realized_pnl),
             "settled_at": _iso(p.settled_at),
+            "updated_at": _iso(p.updated_at),
         }
         for p, m, w in rows
     ]
-    open_items = [i for i in items if i["quantity"] > 0 and i["settled_at"] is None]
+    open_condition = (Position.quantity > 0) & Position.settled_at.is_(None)
+    totals_row = (
+        await db.execute(
+            select(
+                func.coalesce(
+                    func.sum(case((open_condition, 1), else_=0)), 0
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (open_condition, Position.quantity * Position.avg_price),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(func.sum(Position.realized_pnl), 0),
+                func.coalesce(
+                    func.sum(case((Position.settled_at.is_not(None), 1), else_=0)), 0
+                ),
+            )
+        )
+    ).one()
     return {
         "items": items,
         "count": len(items),
         "totals": {
-            "open_count": len(open_items),
-            "open_cost_usd": sum(i["quantity"] * i["avg_price"] for i in open_items),
-            "realized_pnl_usd": sum(i["realized_pnl"] for i in items),
-            "settled_count": len([i for i in items if i["settled_at"] is not None]),
+            # Totals intentionally aggregate the full position table; the
+            # display list remains bounded to the newest 500 rows.
+            "open_count": int(totals_row[0]),
+            "open_cost_usd": float(totals_row[1]),
+            "realized_pnl_usd": float(totals_row[2]),
+            "settled_count": int(totals_row[3]),
         },
     }
