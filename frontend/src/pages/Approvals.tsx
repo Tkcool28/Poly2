@@ -52,7 +52,7 @@ export default function Approvals() {
       setScoringMsg(
         r.scored === 0
           ? "No candidates needed a new review right now."
-          : `Checked ${r.scored} wallet${r.scored > 1 ? "s" : ""}: ${queued} sent to Review.`,
+          : `Checked ${r.scored} wallet${r.scored > 1 ? "s" : ""}: ${queued} currently meet the Review threshold.`,
       );
     } catch (e) {
       setScoringMsg(null);
@@ -77,7 +77,7 @@ export default function Approvals() {
         onClick={runScoring}
         className="mb-4 min-h-[48px] w-full rounded-xl border border-gray-700 text-sm font-medium text-gray-200 active:bg-gray-800"
       >
-        Rescore tracked wallets
+        Rescore candidates
       </button>
       {scoringMsg && (
         <div className="mb-4 text-center text-xs text-gray-400">
