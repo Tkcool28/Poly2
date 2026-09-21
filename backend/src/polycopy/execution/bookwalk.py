@@ -62,8 +62,20 @@ def walk_book(
     if side not in ("BUY", "SELL"):
         raise ValueError(f"side must be BUY or SELL, got {side!r}")
 
+    # Defensive filter (the parse layer already rejects bad levels, but
+    # this function is public): never walk economically invalid levels —
+    # no division-by-zero, no NaN/Infinity VWAP. Polymarket contracts
+    # price in (0, 1]; size must be positive.
+    def _ok(lv: BookLevel) -> bool:
+        return (
+            lv.price.is_finite()
+            and lv.size.is_finite()
+            and Decimal(0) < lv.price <= Decimal(1)
+            and lv.size > 0
+        )
+
     levels = sorted(
-        asks if side == "BUY" else bids,
+        (lv for lv in (asks if side == "BUY" else bids) if _ok(lv)),
         key=lambda lv: lv.price,
         reverse=side == "SELL",
     )

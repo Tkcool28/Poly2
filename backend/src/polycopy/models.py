@@ -166,6 +166,10 @@ class Signal(Base):
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
     # Canonical identity of the source trade (data-api:... composite key).
     source_trade_id: Mapped[str] = mapped_column(String(160))
+    # CLOB token actually traded by the source wallet — carried from
+    # Trade.asset_id so execution never depends on Gamma outcome->token
+    # metadata, which may be missing or stale (PR #7 hardening).
+    asset_id: Mapped[str | None] = mapped_column(String(80))
     side: Mapped[str] = mapped_column(String(4))
     outcome: Mapped[str] = mapped_column(String(40))
     source_price: Mapped[float] = mapped_column(Numeric(10, 6))
@@ -174,6 +178,9 @@ class Signal(Base):
     # pending -> executed | skipped (reason in the decision log)
     status: Mapped[str] = mapped_column(String(20), default="pending")
     t0_traded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Honest detection time = when ingestion first saw the trade
+    # (Trade.ingested_at), not when a later detect_signals() query ran —
+    # detection-lag evidence stays truthful across restarts/backlogs.
     t1_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -223,8 +230,10 @@ class PaperOrder(Base):
     # Raw detection-time book ({"bids": [[price, size], ...], "asks": ...}).
     book_snapshot: Mapped[dict | None] = mapped_column(JSON)
     # Why status == "missed" (e.g. "no_book_depth", "market_closed",
-    # "kill_switch", "no_token_for_outcome", "exposure_cap",
-    # "no_position_to_sell", "price_zone").
+    # "no_token_for_outcome", "exposure_cap", "no_position_to_sell",
+    # "price_zone", "wallet_not_approved"). The kill switch is NOT a miss
+    # reason: it defers the signal (stays pending, no order, no book
+    # request) until the switch clears.
     miss_reason: Mapped[str | None] = mapped_column(String(60))
 
 
@@ -238,6 +247,9 @@ class Position(Base):
     avg_price: Mapped[float] = mapped_column(Numeric(10, 6), default=0)
     realized_pnl: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
     unrealized_pnl: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
+    # Set when this position was settled at market resolution (winner $1 /
+    # loser $0). Idempotency marker: settlement runs skip settled rows.
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
