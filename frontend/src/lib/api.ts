@@ -71,6 +71,7 @@ export interface PositionItem {
   avg_price: number;
   realized_pnl: number;
   settled_at: string | null;
+  updated_at: string | null;
 }
 
 export interface PositionsResponse {
