@@ -188,3 +188,11 @@ async def test_decision_log_action_names_are_explicit(client, session):
     logs = (await session.execute(select(DecisionLogEntry))).scalars().all()
     assert any(log.action == "wallet_rejected" for log in logs)
     assert not any(log.action == "wallet_rejectd" for log in logs)
+
+
+async def test_scoring_run_endpoint_is_the_runtime_owner(client, session):
+    """POST /scoring/run triggers score_all_wallets (Chunk 2 runtime owner).
+    With no discovered/pending wallets it is a clean no-op."""
+    resp = client.post("/scoring/run")
+    assert resp.status_code == 200
+    assert resp.json() == {"scored": 0, "verdicts": {}}
