@@ -93,6 +93,7 @@ async def _seed_approved_trade(
     token_ids=None,
     approved_at=None,
     ingested_at=None,
+    asset_id="4667",
 ) -> Trade:
     wallet = Wallet(
         address=address,
@@ -118,7 +119,7 @@ async def _seed_approved_trade(
         polymarket_trade_id=f"data-api:0xtx{address}:{address}:4667:5:{price}:1",
         market_id=market.id,
         wallet_id=wallet.id,
-        asset_id="4667",
+        asset_id=asset_id,
         side=side,
         outcome=outcome,
         size=5,
@@ -206,18 +207,36 @@ async def test_missed_when_no_depth_is_recorded_not_silent(session):
     assert signal.status == "skipped"
 
 
-async def test_kill_switch_blocks_and_records(session, monkeypatch):
+async def test_kill_switch_defers_without_order_or_book_request(session, monkeypatch):
+    """PR #7 HARDENING: kill switch ON blocks execution WITHOUT consuming
+    the signal — no PaperOrder, no CLOB book request, signal stays
+    pending; once OFF, the signal executes normally (docs/safety.md)."""
     monkeypatch.setenv("POLYCOPY_ORDER_KILL_SWITCH", "true")
     get_settings.cache_clear()
     await _seed_approved_trade(session)
     await detect_signals(session, now=NOW)
     signal = (await session.execute(select(Signal))).scalar_one()
 
-    async with _make_client() as client:
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("book request must not happen under kill switch")
+
+    transport = httpx.MockTransport(boom)
+    async with PolymarketClient(
+        http_client=httpx.AsyncClient(transport=transport)
+    ) as client:
         order = await execute_signal(session, client, signal)
 
-    assert order.status == "missed"
-    assert order.miss_reason == "kill_switch"
+    assert order is None
+    assert signal.status == "pending"
+    assert await session.scalar(select(func.count(PaperOrder.id))) == 0
+
+    # Switch OFF → the same signal becomes eligible and fills normally.
+    monkeypatch.setenv("POLYCOPY_ORDER_KILL_SWITCH", "false")
+    get_settings.cache_clear()
+    async with _make_client() as client:
+        order = await execute_signal(session, client, signal)
+    assert order.status == "filled"
+    assert signal.status == "executed"
 
 
 async def test_no_signals_from_pre_approval_trades(session):
@@ -374,7 +393,11 @@ async def test_decision_log_reports_depth_available_not_consumed(session):
 
 async def test_closed_market_and_missing_token_skip(session):
     await _seed_approved_trade(session, address="0xclosed", closed=True)
-    await _seed_approved_trade(session, address="0xnotok", token_ids={"Down": "8761"})
+    # No token identity anywhere: trade asset_id missing AND Gamma mapping
+    # has no entry for the traded outcome.
+    await _seed_approved_trade(
+        session, address="0xnotok", token_ids={"Down": "8761"}, asset_id=None
+    )
     await detect_signals(session, now=NOW)
     signals = (await session.execute(select(Signal))).scalars().all()
 
@@ -428,10 +451,295 @@ async def test_run_execution_cycle_end_to_end(session):
     async with _make_client() as client:
         stats = await run_execution_cycle(session, client)
 
-    assert stats == {"signals_created": 2, "filled": 2, "partial": 0, "missed": 0}
+    assert stats == {
+        "signals_created": 2, "filled": 2, "partial": 0, "missed": 0,
+        "deferred": 0, "errors": 0, "positions_settled": 0,
+    }
     count = await session.scalar(select(func.count(PaperOrder.id)))
     assert count == 2
     # Idempotent: a second cycle creates nothing new.
     async with _make_client() as client:
         stats2 = await run_execution_cycle(session, client)
-    assert stats2 == {"signals_created": 0, "filled": 0, "partial": 0, "missed": 0}
+    assert stats2 == {
+        "signals_created": 0, "filled": 0, "partial": 0, "missed": 0,
+        "deferred": 0, "errors": 0, "positions_settled": 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PR #7 FINAL HARDENING REGRESSIONS
+# ---------------------------------------------------------------------------
+
+
+async def test_review_delay_blocks_until_eligible(session, monkeypatch):
+    """HARDENING #1: no execution before t1 + review_delay_seconds."""
+    monkeypatch.setenv("POLYCOPY_REVIEW_DELAY_SECONDS", "3600")
+    get_settings.cache_clear()
+    await _seed_approved_trade(session)  # ingested_at = NOW → t1 = NOW
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+
+    async with _make_client() as client:
+        # 30 minutes after detection: inside the 1h delay → deferred.
+        order = await execute_signal(
+            session, client, signal, now=NOW + timedelta(minutes=30)
+        )
+        assert order is None
+        assert signal.status == "pending"
+        assert await session.scalar(select(func.count(PaperOrder.id))) == 0
+
+        # After the delay elapses: eligible, fills normally.
+        order = await execute_signal(
+            session, client, signal, now=NOW + timedelta(hours=1, seconds=1)
+        )
+        assert order.status == "filled"
+        assert signal.status == "executed"
+
+
+async def test_asset_id_used_when_gamma_mapping_absent(session):
+    """HARDENING #2: the source trade's asset_id is the book-request token,
+    even when market.clob_token_ids has no entry for the outcome."""
+    await _seed_approved_trade(
+        session, token_ids={"Down": "8761"}, asset_id="9999"
+    )
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    assert signal.asset_id == "9999"  # carried from the trade
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.params["token_id"])
+        return httpx.Response(200, json=BOOK)
+
+    transport = httpx.MockTransport(handler)
+    async with PolymarketClient(
+        http_client=httpx.AsyncClient(transport=transport)
+    ) as client:
+        order = await execute_signal(session, client, signal)
+
+    assert seen == ["9999"]  # NOT the Gamma mapping (which lacks "Up")
+    assert order.status == "filled"
+
+
+async def test_t1_is_honest_ingestion_time(session):
+    """HARDENING #8: t1 = Trade.ingested_at, not the detect_signals() run
+    time — detection-lag evidence stays truthful after backlogs."""
+    ingested = NOW - timedelta(hours=3)
+    await _seed_approved_trade(
+        session, approved_at=ingested - timedelta(hours=1), ingested_at=ingested
+    )
+    # Detection query runs 3h later (restart/backlog).
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    assert signal.t1_detected_at == ingested.replace(tzinfo=None)  # SQLite-naive
+    assert signal.t1_detected_at != NOW.replace(tzinfo=None)
+
+
+async def test_disabled_wallet_cannot_execute_delayed_signal(session):
+    """HARDENING #7: approval is rechecked at execution time — a wallet
+    disabled during the review delay must not execute (no book request)."""
+    trade = await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+
+    wallet = await session.get(Wallet, trade.wallet_id)
+    wallet.approval_state = "disabled"
+    await session.commit()
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("book request must not happen for disabled wallet")
+
+    transport = httpx.MockTransport(boom)
+    async with PolymarketClient(
+        http_client=httpx.AsyncClient(transport=transport)
+    ) as client:
+        order = await execute_signal(session, client, signal)
+
+    assert order.status == "missed"
+    assert order.miss_reason == "wallet_not_approved"
+    assert signal.status == "skipped"
+    assert await session.scalar(
+        select(func.count(Position.id)).where(Position.quantity > 0)
+    ) == 0
+
+
+async def test_fee_aware_buy_sell_round_trip(session, monkeypatch):
+    """HARDENING #9: BUY fee enters cost basis, SELL fee exits realized
+    P&L — PaperOrder fees and portfolio P&L agree exactly."""
+    monkeypatch.setenv("POLYCOPY_PAPER_FEE_RATE", "0.01")
+    monkeypatch.setenv("POLYCOPY_MAX_ORDER_SIZE_USD", "20")
+    get_settings.cache_clear()
+
+    # BUY: $20 at ask 0.50 → 40 shares, fee $0.20 → cost basis 20.20,
+    # avg_price = 20.20/40 = 0.505.
+    await _seed_approved_trade(session, address="0xbuyer")
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    book_buy = {"bids": [{"price": "0.48", "size": "500"}],
+                "asks": [{"price": "0.50", "size": "100"}]}
+    async with _make_client(book_buy) as client:
+        buy_order = await execute_signal(session, client, signal)
+    assert buy_order.status == "filled"
+    fee_buy = Decimal(str(buy_order.fee))
+    assert fee_buy == Decimal("0.200000")  # 1% of $20
+    position = (await session.execute(select(Position))).scalar_one()
+    avg = Decimal(str(position.avg_price))
+    qty = Decimal(str(position.quantity))
+    assert qty == Decimal("40.000000")
+    assert avg == (Decimal("20.20") / 40).quantize(Decimal("0.000001"))
+
+    # SELL all 40 shares at bid 1.00 with a $40 order so the full
+    # position exits; fee 1% of $40 = $0.40.
+    monkeypatch.setenv("POLYCOPY_MAX_ORDER_SIZE_USD", "40")
+    get_settings.cache_clear()
+    sell_trade = await _seed_approved_trade(
+        session, address="0xseller", side="SELL", price=0.99
+    )
+    sell_trade.market_id = signal.market_id
+    sell_trade.wallet_id = signal.wallet_id
+    await session.commit()
+    await detect_signals(session, now=NOW)
+    sell_signal = (
+        await session.execute(select(Signal).where(Signal.side == "SELL"))
+    ).scalar_one()
+    book_sell = {"bids": [{"price": "1.00", "size": "100"}],
+                 "asks": [{"price": "1.00", "size": "100"}]}
+    async with _make_client(book_sell) as client:
+        sell_order = await execute_signal(session, client, sell_signal)
+
+    assert sell_order.status == "filled"
+    fee_sell = Decimal(str(sell_order.fee))
+    assert fee_sell == Decimal("0.400000")  # 1% of $40
+    await session.refresh(position)
+    realized = Decimal(str(position.realized_pnl))
+    # Exact: 40 × (1.00 − 0.505) − 0.40 = 19.80 − 0.40 = 19.40
+    assert realized == Decimal("19.400000")
+    assert Decimal(str(position.quantity)) == Decimal("0.000000")
+    # PaperOrder fees and portfolio P&L cannot disagree:
+    # cash out (40×1 − 0.40) − cash in (20 + 0.20) = 19.40 == realized.
+    assert (Decimal(40) - fee_sell) - (Decimal(20) + fee_buy) == realized
+
+
+async def test_malformed_book_fails_closed(session):
+    """HARDENING #10: invalid levels are rejected before the walk — no
+    division-by-zero, no invalid VWAP, no cycle failure."""
+    await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    bad_book = {
+        "bids": [{"price": "0", "size": "10"}, {"price": "nan", "size": "5"}],
+        "asks": [
+            {"price": "0", "size": "10"},          # zero price
+            {"price": "-0.5", "size": "10"},       # negative
+            {"price": "1.5", "size": "10"},        # above contract max
+            {"price": "0.5", "size": "0"},         # zero size
+            {"price": "nan", "size": "10"},        # non-finite
+            {"price": "inf", "size": "10"},        # non-finite
+            {"bogus": "level"},                    # malformed shape
+        ],
+    }
+    async with _make_client(bad_book) as client:
+        order = await execute_signal(session, client, signal)
+    # Every ask level invalid → no depth → recorded miss, never a crash.
+    assert order.status == "missed"
+    assert order.miss_reason == "no_book_depth"
+
+
+async def test_one_failed_signal_does_not_block_later_signals(session):
+    """HARDENING #11: a failing CLOB request rolls back THAT signal and
+    the cycle continues — later signals still execute."""
+    await _seed_approved_trade(session, address="0xbad", asset_id="1111")
+    await _seed_approved_trade(session, address="0xgood", asset_id="2222")
+    await detect_signals(session, now=NOW)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params["token_id"] == "1111":
+            # Persistent failure (the client retries transient errors —
+            # every attempt for THIS token must fail).
+            raise httpx.ConnectError("clob down", request=request)
+        return httpx.Response(200, json=BOOK)
+
+    transport = httpx.MockTransport(handler)
+    async with PolymarketClient(
+        http_client=httpx.AsyncClient(transport=transport)
+    ) as client:
+        stats = await run_execution_cycle(session, client)
+
+    assert stats["errors"] == 1
+    assert stats["filled"] == 1
+    # The good signal executed; the bad one is still pending for retry
+    # (rollback left no partial order behind).
+    statuses = {
+        s.source_trade_id: s.status
+        for s in (await session.execute(select(Signal))).scalars().all()
+    }
+    assert sorted(statuses.values()) == ["executed", "pending"]
+    assert await session.scalar(select(func.count(PaperOrder.id))) == 1
+
+
+async def test_execution_backlog_is_bounded(session, monkeypatch):
+    """HARDENING #12: one cycle never exceeds execution_batch_size book
+    requests, and detection is bounded too."""
+    monkeypatch.setenv("POLYCOPY_EXECUTION_BATCH_SIZE", "2")
+    monkeypatch.setenv("POLYCOPY_SIGNAL_DETECTION_BATCH_SIZE", "2")
+    get_settings.cache_clear()
+    for i in range(3):
+        await _seed_approved_trade(session, address=f"0x{i}")
+
+    requests = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests["n"] += 1
+        return httpx.Response(200, json=BOOK)
+
+    transport = httpx.MockTransport(handler)
+    async with PolymarketClient(
+        http_client=httpx.AsyncClient(transport=transport)
+    ) as client:
+        stats = await run_execution_cycle(session, client)
+
+    assert stats["signals_created"] == 2  # detection bound
+    assert stats["filled"] == 2  # execution bound
+    assert requests["n"] == 2  # deterministic max CLOB requests
+
+
+async def test_paper_settlement_winner_loser_idempotent(session):
+    """HARDENING #13: open paper positions realize at $1/$0 exactly once
+    when the market resolves — repeated cycles are no-ops."""
+    from polycopy.execution.service import settle_paper_positions
+    from polycopy.models import Settlement
+
+    wallet = Wallet(address="0xs", approval_state="approved",
+                    approved_at=NOW - timedelta(hours=1))
+    session.add(wallet)
+    await session.flush()
+    market = Market(condition_id="0xcondsettle", question="?",
+                    clob_token_ids={"Up": "4667", "Down": "8761"})
+    session.add(market)
+    await session.flush()
+    # Winner: 10 shares "Up" at avg 0.60 (cost 6.00) → +4.00.
+    win = Position(market_id=market.id, outcome="Up", quantity=10,
+                   avg_price=Decimal("0.6"), realized_pnl=0, unrealized_pnl=0)
+    # Loser: 5 shares "Down" at avg 0.30 (cost 1.50) → −1.50.
+    lose = Position(market_id=market.id, outcome="Down", quantity=5,
+                    avg_price=Decimal("0.3"), realized_pnl=0, unrealized_pnl=0)
+    session.add_all([win, lose])
+    session.add(Settlement(market_id=market.id, winning_outcome="Up"))
+    await session.commit()
+
+    stats = await settle_paper_positions(session, now=NOW)
+    assert stats == {"settled": 2, "winners": 1, "losers": 1}
+    await session.refresh(win)
+    await session.refresh(lose)
+    assert Decimal(str(win.realized_pnl)) == Decimal("4.000000")
+    assert Decimal(str(lose.realized_pnl)) == Decimal("-1.500000")
+    assert Decimal(str(win.quantity)) == Decimal("0.000000")
+    assert Decimal(str(lose.quantity)) == Decimal("0.000000")
+    assert win.settled_at is not None and lose.settled_at is not None
+
+    # Idempotent: repeated settlement cycles change nothing.
+    stats2 = await settle_paper_positions(session, now=NOW + timedelta(hours=1))
+    assert stats2 == {"settled": 0, "winners": 0, "losers": 0}
+    await session.refresh(win)
+    assert Decimal(str(win.realized_pnl)) == Decimal("4.000000")
