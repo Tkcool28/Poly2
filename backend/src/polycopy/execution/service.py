@@ -108,8 +108,8 @@ async def detect_signals(session: AsyncSession, *, now: datetime | None = None) 
     """Turn new approved-wallet trades into signals. Idempotent.
 
     A trade gets a signal iff its wallet is currently ``approved``, the
-    trade was INGESTED at/after the wallet's ``approved_at`` boundary
-    (pre-approval trades are history, never copyable — PR #7 review), and
+    trade was TRADED and INGESTED at/after the wallet's ``approved_at``
+    boundary (pre-approval source activity is history, never copyable), and
     no signal with that source_trade_id exists yet. t1 (detection) is the
     trade's ``ingested_at`` — the honest timestamp of when we saw it, so
     detection-lag evidence stays truthful after restarts/backlogs.
@@ -130,6 +130,7 @@ async def detect_signals(session: AsyncSession, *, now: datetime | None = None) 
             .where(
                 Wallet.approval_state == "approved",
                 Wallet.approved_at.is_not(None),
+                Trade.traded_at >= Wallet.approved_at,
                 Trade.ingested_at >= Wallet.approved_at,
                 ~already_signaled,
             )
@@ -275,6 +276,7 @@ async def execute_signal(
         position = (
             await session.execute(
                 select(Position).where(
+                    Position.wallet_id == signal.wallet_id,
                     Position.market_id == signal.market_id,
                     Position.outcome == signal.outcome,
                 )
@@ -365,6 +367,7 @@ async def execute_signal(
     position = (
         await session.execute(
             select(Position).where(
+                Position.wallet_id == signal.wallet_id,
                 Position.market_id == signal.market_id,
                 Position.outcome == signal.outcome,
             )
@@ -372,6 +375,7 @@ async def execute_signal(
     ).scalar_one_or_none()
     if position is None:
         position = Position(
+            wallet_id=signal.wallet_id,
             market_id=signal.market_id, outcome=signal.outcome,
             quantity=0, avg_price=0, realized_pnl=0, unrealized_pnl=0,
         )
@@ -461,6 +465,7 @@ async def settle_paper_positions(
                 action="paper_position_settled",
                 context={
                     "position_id": position.id,
+                    "wallet_id": position.wallet_id,
                     "market_id": position.market_id,
                     "outcome": position.outcome,
                     "winning_outcome": settlement.winning_outcome,
@@ -494,10 +499,10 @@ async def run_execution_cycle(
     """
     _assert_paper_mode()
     settings = get_settings()
-    now = datetime.now(UTC)
+    cycle_started_at = datetime.now(UTC)
 
     created = await detect_signals(session)
-    settled = await settle_paper_positions(session, now=now)
+    settled = await settle_paper_positions(session, now=cycle_started_at)
 
     # IDs only: a per-signal rollback expires the identity map, so each
     # signal is re-fetched fresh inside the loop.
@@ -525,11 +530,14 @@ async def run_execution_cycle(
             continue  # settled by a concurrent path — never double-execute
         # Signals are oldest-first; once one is inside the review delay,
         # all later (newer) ones are too — stop early.
-        if now < _eligible_at(signal) and not settings.order_kill_switch:
+        signal_now = datetime.now(UTC)
+        if signal_now < _eligible_at(signal) and not settings.order_kill_switch:
             break
         source_trade_id = signal.source_trade_id
         try:
-            order = await execute_signal(session, client, signal, now=now)
+            # Fresh timestamp per signal: t2 reflects this signal's actual
+            # decision/book-snapshot attempt, not the start of the batch.
+            order = await execute_signal(session, client, signal, now=signal_now)
         except Exception as exc:
             await session.rollback()
             stats["errors"] += 1
