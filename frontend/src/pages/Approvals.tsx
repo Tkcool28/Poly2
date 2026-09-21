@@ -47,11 +47,11 @@ export default function Approvals() {
     try {
       const r = await api.runScoring();
       const queued = Object.values(r.verdicts).filter(
-        (v) => v === "queued_for_review",
+        (v) => v === "pending_review",
       ).length;
       setScoringMsg(
         r.scored === 0
-          ? "No new wallets to check right now."
+          ? "No tracked wallets needed a new review right now."
           : `Checked ${r.scored} wallet${r.scored > 1 ? "s" : ""}: ${queued} sent to Review.`,
       );
     } catch (e) {
@@ -77,7 +77,7 @@ export default function Approvals() {
         onClick={runScoring}
         className="mb-4 min-h-[48px] w-full rounded-xl border border-gray-700 text-sm font-medium text-gray-200 active:bg-gray-800"
       >
-        Check for new candidates
+        Rescore tracked wallets
       </button>
       {scoringMsg && (
         <div className="mb-4 text-center text-xs text-gray-400">
@@ -88,7 +88,7 @@ export default function Approvals() {
       {items.length === 0 ? (
         <EmptyState
           title="All caught up"
-          message="No wallets are waiting for a decision. New candidates appear here after scoring finds a wallet worth a look."
+          message="No wallets are waiting for a decision. Tracked wallets appear here when rescoring finds one worth a look."
         />
       ) : (
         <div className="space-y-3">
