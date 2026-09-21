@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI
@@ -14,7 +15,15 @@ from polycopy.api.routes import router as api_router
 from polycopy.config import Settings, get_settings
 from polycopy.db import dispose_engine, get_db
 from polycopy.logging_config import configure_logging, get_logger
-from polycopy.models import Market, PaperOrder, Position, Signal, Wallet, WalletScore
+from polycopy.models import (
+    Market,
+    PaperOrder,
+    Position,
+    ServiceHeartbeat,
+    Signal,
+    Wallet,
+    WalletScore,
+)
 
 logger = get_logger("polycopy.api")
 
@@ -78,6 +87,27 @@ async def health_deps(
         checks["redis"] = "ok"
     except Exception as exc:  # noqa: BLE001
         checks["redis"] = f"error: {type(exc).__name__}"
+
+    try:
+        heartbeat = (
+            await db.execute(
+                select(ServiceHeartbeat)
+                .where(ServiceHeartbeat.service == "bot")
+                .order_by(ServiceHeartbeat.seen_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if heartbeat is None:
+            checks["bot"] = "missing"
+        else:
+            seen_at = heartbeat.seen_at
+            if seen_at.tzinfo is None:
+                seen_at = seen_at.replace(tzinfo=UTC)
+            age_seconds = (datetime.now(UTC) - seen_at).total_seconds()
+            stale_after = max(60.0, settings.ingestion_poll_interval_seconds * 3)
+            checks["bot"] = "ok" if age_seconds <= stale_after else "stale"
+    except Exception as exc:  # noqa: BLE001
+        checks["bot"] = f"error: {type(exc).__name__}"
 
     ok = all(v == "ok" for v in checks.values())
     return {"status": "ok" if ok else "degraded", "checks": checks}
