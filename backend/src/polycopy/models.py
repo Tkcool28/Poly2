@@ -52,6 +52,10 @@ class Wallet(Base):
     label: Mapped[str | None] = mapped_column(String(120))
     # Single source of truth for approval. No parallel boolean.
     approval_state: Mapped[str] = mapped_column(String(20), default="discovered")
+    # Copy-enabled boundary (PR #7 review): set when a human approves the
+    # wallet. Only trades INGESTED at/after this moment may become signals —
+    # pre-approval trades are history, never copyable.
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     is_sample: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
@@ -146,16 +150,38 @@ class WalletScore(Base):
 
 
 class Signal(Base):
+    """A source-wallet trade we may copy. Idempotent via source_trade_id.
+
+    Timestamps follow docs/paper-execution-model.md: t0 = source trade time,
+    t1 = when our ingestion saw it (detection lag = t1 - t0).
+    """
+
     __tablename__ = "signals"
+    __table_args__ = (
+        UniqueConstraint("source_trade_id", name="uq_signals_source_trade"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"), index=True)
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
+    # Canonical identity of the source trade (data-api:... composite key).
+    source_trade_id: Mapped[str] = mapped_column(String(160))
+    # CLOB token actually traded by the source wallet — carried from
+    # Trade.asset_id so execution never depends on Gamma outcome->token
+    # metadata, which may be missing or stale (PR #7 hardening).
+    asset_id: Mapped[str | None] = mapped_column(String(80))
     side: Mapped[str] = mapped_column(String(4))
     outcome: Mapped[str] = mapped_column(String(40))
+    source_price: Mapped[float] = mapped_column(Numeric(10, 6))
     edge: Mapped[float | None] = mapped_column(Float)
     confidence: Mapped[float | None] = mapped_column(Float)
+    # pending -> executed | skipped (reason in the decision log)
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    t0_traded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Honest detection time = when ingestion first saw the trade
+    # (Trade.ingested_at), not when a later detect_signals() query ran —
+    # detection-lag evidence stays truthful across restarts/backlogs.
+    t1_detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -171,13 +197,20 @@ class ApprovalQueueEntry(Base):
 
 
 class PaperOrder(Base):
+    """One simulated fill. Status: filled / partial / missed.
+
+    Evidence fields (per docs/paper-execution-model.md) record what the
+    book looked like at detection/decision time so larger sizing and
+    different gates can be evaluated offline later.
+    """
+
     __tablename__ = "paper_orders"
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_paper_orders_idempotency"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    idempotency_key: Mapped[str] = mapped_column(String(80))
+    idempotency_key: Mapped[str] = mapped_column(String(200))
     signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"))
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"))
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"))
@@ -187,18 +220,45 @@ class PaperOrder(Base):
     status: Mapped[str] = mapped_column(String(20), default="preview")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # --- Realistic-fill evidence (PR-E) -----------------------------------
+    t2_decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Volume-weighted fill price from walking the book — NEVER the source
+    # wallet's price.
+    fill_price: Mapped[float | None] = mapped_column(Numeric(10, 6))
+    filled_size: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    fee: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    # Raw detection-time book ({"bids": [[price, size], ...], "asks": ...}).
+    book_snapshot: Mapped[dict | None] = mapped_column(JSON)
+    # Why status == "missed" (e.g. "no_book_depth", "market_closed",
+    # "no_token_for_outcome", "exposure_cap", "no_position_to_sell",
+    # "price_zone", "wallet_not_approved"). The kill switch is NOT a miss
+    # reason: it defers the signal (stays pending, no order, no book
+    # request) until the switch clears.
+    miss_reason: Mapped[str | None] = mapped_column(String(60))
 
 
 class Position(Base):
     __tablename__ = "positions"
+    __table_args__ = (
+        UniqueConstraint(
+            "wallet_id", "market_id", "outcome",
+            name="uq_positions_wallet_market_outcome",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Paper inventory is scoped to the source wallet being copied. Without
+    # this key, one wallet's SELL could consume another wallet's paper shares.
+    wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"), index=True)
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
     outcome: Mapped[str] = mapped_column(String(40))
     quantity: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
     avg_price: Mapped[float] = mapped_column(Numeric(10, 6), default=0)
     realized_pnl: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
     unrealized_pnl: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
+    # Set when this position was settled at market resolution (winner $1 /
+    # loser $0). Idempotency marker: settlement runs skip settled rows.
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

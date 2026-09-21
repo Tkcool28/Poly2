@@ -17,6 +17,11 @@ default is BLOCK. There is no "default allow" path.
 `POLYCOPY_ORDER_KILL_SWITCH` is an **independent global execution gate**.
 When ON it blocks ALL order creation — paper and live alike.
 
+In the paper bot this is a **defer**, not a consume (PR #7 hardening):
+a kill-switch-blocked signal stays `pending`, no PaperOrder is created,
+and no CLOB book request is made. When the switch clears, the signal
+becomes eligible normally. It is never marked `skipped`.
+
 It is intentionally legal to boot a live-capable system with the kill switch
 ON:
 

@@ -22,6 +22,7 @@ from polycopy.models import (
     Wallet,
     WalletScore,
 )
+from polycopy.scoring.service import score_all_wallets
 
 router = APIRouter()
 
@@ -74,6 +75,19 @@ async def get_wallet_score(
     return _score_payload(score)
 
 
+@router.post("/scoring/run")
+async def run_scoring(db: AsyncSession = Depends(get_db)) -> dict:
+    """Operator-triggered scoring pass over discovered/pending wallets.
+
+    This endpoint is the runtime owner of ``score_all_wallets`` in
+    Chunk 2: candidate discovery is manual, so scoring runs on demand
+    (operator or cron hitting this route), not in the trading bot loop.
+    """
+    verdicts = await score_all_wallets(db)
+    await db.commit()
+    return {"scored": len(verdicts), "verdicts": verdicts}
+
+
 @router.get("/approval-queue")
 async def list_approval_queue(db: AsyncSession = Depends(get_db)) -> dict:
     """Pending approvals: wallets the scorer flagged ≥70 awaiting a human."""
@@ -119,7 +133,12 @@ async def transition_wallet(
     result = await db.execute(
         update(Wallet)
         .where(Wallet.id == wallet_id, Wallet.approval_state == required_from)
-        .values(approval_state=target)
+        .values(
+            approval_state=target,
+            # approved_at is the copy-enabled boundary: only trades ingested
+            # after this moment may ever become signals (review fix, PR #7).
+            **({"approved_at": datetime.now(UTC)} if target == "approved" else {}),
+        )
         .execution_options(synchronize_session=False)
     )
     if result.rowcount == 0:
