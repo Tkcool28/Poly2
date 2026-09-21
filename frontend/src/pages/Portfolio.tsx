@@ -14,7 +14,7 @@ export default function Portfolio() {
   const { data, error } = useApi(api.positions);
   const items = data?.items ?? [];
   const open = items.filter((i) => i.quantity > 0 && !i.settled_at);
-  const settled = items.filter((i) => i.settled_at);
+  const closed = items.filter((i) => !(i.quantity > 0 && !i.settled_at));
   const totals = data?.totals;
 
   return (
@@ -87,16 +87,16 @@ export default function Portfolio() {
       )}
 
       <h3 className="mb-2 mt-6 text-sm font-semibold text-gray-300">
-        Settled ({settled.length})
+        Closed / settled ({closed.length})
       </h3>
-      {settled.length === 0 ? (
+      {closed.length === 0 ? (
         <EmptyState
-          title="No settled positions yet"
-          message="When a market you hold resolves, the result is booked here — winners pay $1 per share, losers $0."
+          title="No closed positions yet"
+          message="Positions appear here after a copied sell or market resolution — winners at resolution pay $1 per share, losers $0."
         />
       ) : (
         <div className="space-y-3">
-          {settled.map((p) => (
+          {closed.map((p) => (
             <div key={p.id} className="rounded-xl bg-gray-900 p-4">
               <div className="flex items-start justify-between gap-2">
                 <div className="text-sm font-medium leading-snug">
@@ -111,7 +111,8 @@ export default function Portfolio() {
                 </span>
               </div>
               <div className="mt-1 text-xs text-gray-500">
-                {p.outcome} • settled {timeAgo(p.settled_at)}
+                {p.outcome} • {p.settled_at ? "market settled" : "position closed"}{" "}
+                {timeAgo(p.settled_at ?? p.updated_at)}
               </div>
             </div>
           ))}
