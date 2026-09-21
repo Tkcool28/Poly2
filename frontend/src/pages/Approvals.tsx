@@ -51,7 +51,7 @@ export default function Approvals() {
       ).length;
       setScoringMsg(
         r.scored === 0
-          ? "No tracked wallets needed a new review right now."
+          ? "No candidates needed a new review right now."
           : `Checked ${r.scored} wallet${r.scored > 1 ? "s" : ""}: ${queued} sent to Review.`,
       );
     } catch (e) {
