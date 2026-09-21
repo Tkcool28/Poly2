@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import PageShell, { EmptyState, LoadError } from "../components/PageShell";
 import {
@@ -11,6 +12,7 @@ import {
 /** Wallets: everyone the bot tracks, their state, and their score. */
 export default function Wallets() {
   const { data, error, refresh } = useApi(api.wallets);
+  const [actionError, setActionError] = useState<string | null>(null);
   const items = data?.items ?? [];
 
   async function disable(id: number, address: string) {
@@ -21,8 +23,13 @@ export default function Wallets() {
     ) {
       return;
     }
-    await api.walletAction(id, "disable");
-    refresh();
+    setActionError(null);
+    try {
+      await api.walletAction(id, "disable");
+      refresh();
+    } catch (e) {
+      setActionError(`Couldn't stop following that wallet. (${e})`);
+    }
   }
 
   return (
@@ -31,6 +38,11 @@ export default function Wallets() {
       explainer="Polymarket wallets the bot knows about. Only wallets marked “Following” get copied — and only trades they make after you approved them."
     >
       <LoadError error={error} />
+      {actionError && (
+        <div className="mb-3 rounded-lg bg-red-900/50 p-3 text-sm text-red-200">
+          {actionError}
+        </div>
+      )}
       {items.length === 0 ? (
         <EmptyState
           title="No wallets yet"
