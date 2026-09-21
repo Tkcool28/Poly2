@@ -273,3 +273,36 @@ async def test_position_totals_are_not_limited_to_display_window(client, session
     body = client.get("/positions").json()
     assert body["count"] == 500
     assert body["totals"]["realized_pnl_usd"] == pytest.approx(501.0)
+
+
+async def test_wallet_latest_score_is_per_wallet_not_global_history_limit(client, session):
+    noisy = Wallet(address="0xnoisy", approval_state="discovered")
+    quiet = Wallet(address="0xquiet", approval_state="approved")
+    session.add_all([noisy, quiet])
+    await session.flush()
+
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    session.add(
+        WalletScore(
+            wallet_id=quiet.id,
+            composite_score=91.0,
+            behavioral_tags=[],
+            computed_at=base,
+        )
+    )
+    session.add_all(
+        [
+            WalletScore(
+                wallet_id=noisy.id,
+                composite_score=float(i % 100),
+                behavioral_tags=[],
+                computed_at=base + timedelta(seconds=i + 1),
+            )
+            for i in range(2001)
+        ]
+    )
+    await session.commit()
+
+    items = {i["address"]: i for i in client.get("/wallets").json()["items"]}
+    assert items["0xquiet"]["composite_score"] == pytest.approx(91.0)
+    assert items["0xnoisy"]["composite_score"] == pytest.approx(0.0)
