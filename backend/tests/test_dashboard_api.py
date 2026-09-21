@@ -261,7 +261,7 @@ async def test_position_totals_are_not_limited_to_display_window(client, session
                 wallet_id=wallet.id,
                 market_id=market.id,
                 outcome=f"O{i}",
-                quantity=Decimal("0"),
+                quantity=Decimal(0),
                 avg_price=Decimal("0.500000"),
                 realized_pnl=Decimal("1.000000"),
             )
