@@ -43,3 +43,7 @@
   permissions, private-key storage, backup encryption, no secrets in images
   or git, credential rotation
 - Ops gate: DB growth/disk monitoring, WAL management, log rotation,
+  backup/restore drills, retention policy
+- Order cancellation, execution reconciliation, recovery behavior, alerts,
+  canary deployment, live-readiness review
+- Only after sustained profitable paper results justify it
