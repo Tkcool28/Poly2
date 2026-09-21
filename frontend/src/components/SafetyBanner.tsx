@@ -17,10 +17,19 @@ export default function SafetyBanner() {
   }
   if (!status) return null;
 
-  if (!status.paper_mode) {
+  if (!status.paper_mode && status.allow_live_trading) {
     return (
       <div className="bg-red-700 px-4 py-2 text-center text-sm font-semibold">
         LIVE MODE — real money is at stake
+        {status.order_kill_switch && " • copying is paused"}
+      </div>
+    );
+  }
+
+  if (!status.paper_mode) {
+    return (
+      <div className="bg-red-900 px-4 py-2 text-center text-sm font-semibold">
+        Invalid execution mode — copying should be treated as stopped
       </div>
     );
   }
