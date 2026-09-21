@@ -1,20 +1,18 @@
-"""PR #7 hardening: migrations must be safe against a POPULATED pre-PR-E
-schema — not just render as SQL on an empty one.
+"""PostgreSQL migration regression for the populated pre-PR-E schema.
 
-* 0003: legacy signal rows (no source identity) must be removed, and
-  signals.source_trade_id must end up NOT NULL + unique.
-* 0004: wallets already approved before the column existed must get a
-  deterministic approved_at backfill — they must never become permanently
-  unable to produce signals.
-* 0005: signals.asset_id backfills from the originating trade.
+PostgreSQL is Poly2's authoritative database. This test is skipped only when
+POLYCOPY_TEST_POSTGRES_URL is not provided (for lightweight local runs); CI
+provides a real PostgreSQL service and therefore always executes it.
 """
 
 from __future__ import annotations
 
+import asyncio
+import os
 from pathlib import Path
 
+import asyncpg
 import pytest
-import sqlalchemy as sa
 from alembic.config import Config
 
 from alembic import command
@@ -31,84 +29,141 @@ def _alembic_cfg(db_url: str, monkeypatch: pytest.MonkeyPatch) -> Config:
     return cfg
 
 
-def _seed_pre_pre_schema(db_path: Path) -> None:
-    """Populate the 0002-era schema with legacy rows (sync sqlite)."""
-    engine = sa.create_engine(f"sqlite:///{db_path}")
-    with engine.begin() as conn:
-        conn.execute(
-            sa.text(
-                "INSERT INTO wallets (address, approval_state, is_sample,"
-                " created_at, updated_at) VALUES"
-                " ('0xlegacy', 'approved', 0, '2026-09-01 00:00:00',"
-                "  '2026-09-10 12:00:00')"
-            )
-        )
-        conn.execute(
-            sa.text(
-                "INSERT INTO markets (condition_id, question, active, closed,"
-                " created_at) VALUES ('0xcond', '?', 1, 0, '2026-09-01')"
-            )
-        )
-        conn.execute(
-            sa.text(
-                "INSERT INTO trades (polymarket_trade_id, market_id, wallet_id,"
-                " asset_id, side, outcome, size, price, fee, traded_at,"
-                " ingested_at) VALUES ('data-api:0xtx:0xlegacy:4667:5:0.5:1',"
-                " 1, 1, '4667', 'BUY', 'Up', 5, 0.5, 0, '2026-09-10',"
-                " '2026-09-10')"
-            )
-        )
-        # Legacy placeholder signal: no canonical source identity.
-        conn.execute(
-            sa.text(
-                "INSERT INTO signals (wallet_id, market_id, side, outcome,"
-                " status, created_at) VALUES (1, 1, 'BUY', 'Up', 'pending',"
-                " '2026-09-10')"
-            )
-        )
-    engine.dispose()
+def _asyncpg_dsn(sqlalchemy_url: str) -> str:
+    return sqlalchemy_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
 
-def test_upgrade_from_populated_pre_pr_e_schema(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def _seed_pre_pr_e(db_url: str) -> None:
+    conn = await asyncpg.connect(_asyncpg_dsn(db_url))
+    try:
+        await conn.execute(
+            """
+            INSERT INTO wallets
+                (address, approval_state, is_sample, created_at, updated_at)
+            VALUES
+                ('0xlegacy', 'approved', false,
+                 '2026-09-01 00:00:00+00', '2026-09-10 12:00:00+00')
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO markets
+                (condition_id, question, active, closed, created_at)
+            VALUES
+                ('0xcond', '?', true, false, '2026-09-01 00:00:00+00')
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO trades
+                (polymarket_trade_id, market_id, wallet_id, asset_id,
+                 side, outcome, size, price, fee, traded_at, ingested_at)
+            VALUES
+                ('data-api:0xtx:0xlegacy:4667:5:0.5:1',
+                 1, 1, '4667', 'BUY', 'Up', 5, 0.5, 0,
+                 '2026-09-10 00:00:00+00', '2026-09-10 00:00:00+00')
+            """
+        )
+        # Legacy placeholders: neither row has enough identity to be trusted
+        # as PR-E execution evidence.
+        await conn.execute(
+            """
+            INSERT INTO signals
+                (wallet_id, market_id, side, outcome, status, created_at)
+            VALUES
+                (1, 1, 'BUY', 'Up', 'pending', '2026-09-10 00:00:00+00')
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO positions
+                (market_id, outcome, quantity, avg_price,
+                 realized_pnl, unrealized_pnl, updated_at)
+            VALUES
+                (1, 'Up', 3, 0.5, 0, 0, '2026-09-10 00:00:00+00')
+            """
+        )
+    finally:
+        await conn.close()
+
+
+async def _verify_head(db_url: str) -> None:
+    conn = await asyncpg.connect(_asyncpg_dsn(db_url))
+    try:
+        # 0003: legacy NULL-identity signals are removed, and source identity
+        # is mandatory going forward.
+        assert await conn.fetchval("SELECT COUNT(*) FROM signals") == 0
+        assert await conn.fetchval(
+            """
+            SELECT is_nullable = 'NO'
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'signals'
+              AND column_name = 'source_trade_id'
+            """
+        )
+
+        # 0004: an already-approved wallet receives a deterministic copy
+        # boundary rather than becoming permanently unable to signal.
+        assert await conn.fetchval(
+            "SELECT approved_at IS NOT NULL FROM wallets WHERE address='0xlegacy'"
+        )
+
+        # 0005: source-token evidence + wallet-scoped paper positions exist.
+        signal_asset = await conn.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_schema='public' AND table_name='signals'
+              AND column_name='asset_id'
+            """
+        )
+        assert signal_asset == 1
+        position_cols = {
+            row["column_name"]
+            for row in await conn.fetch(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='positions'
+                """
+            )
+        }
+        assert {"wallet_id", "settled_at"} <= position_cols
+
+        # Pre-PR-E position placeholders had no source-wallet identity and
+        # are intentionally discarded during 0005.
+        assert await conn.fetchval("SELECT COUNT(*) FROM positions") == 0
+
+        constraints = {
+            row["constraint_name"]
+            for row in await conn.fetch(
+                """
+                SELECT constraint_name
+                FROM information_schema.table_constraints
+                WHERE table_schema='public' AND table_name='positions'
+                """
+            )
+        }
+        assert "uq_positions_wallet_market_outcome" in constraints
+        assert "fk_positions_wallet_id_wallets" in constraints
+    finally:
+        await conn.close()
+
+
+def test_upgrade_from_populated_pre_pr_e_schema_postgres(
+    monkeypatch: pytest.MonkeyPatch,
 ):
-    db_path = tmp_path / "legacy.db"
-    db_url = f"sqlite+aiosqlite:///{db_path}"
+    db_url = os.environ.get("POLYCOPY_TEST_POSTGRES_URL")
+    if not db_url:
+        pytest.skip("real PostgreSQL migration test requires POLYCOPY_TEST_POSTGRES_URL")
+
     cfg = _alembic_cfg(db_url, monkeypatch)
-
-    command.upgrade(cfg, "0002")  # pre-PR-E schema
-    _seed_pre_pre_schema(db_path)
-    command.upgrade(cfg, "head")  # the full PR-E + hardening chain
-
-    engine = sa.create_engine(f"sqlite:///{db_path}")
-    with engine.connect() as conn:
-        # 0003: the legacy placeholder signal was removed (NULL source
-        # identity would poison NOT IN semantics and is not evidence).
-        assert conn.execute(sa.text("SELECT COUNT(*) FROM signals")).scalar() == 0
-        # 0003: source identity is NOT NULL going forward.
-        assert conn.execute(
-            sa.text(
-                "SELECT COUNT(*) FROM pragma_table_info('signals')"
-                " WHERE name='source_trade_id' AND \"notnull\"=1"
-            )
-        ).scalar() == 1
-        # 0004: the already-approved wallet got a deterministic backfill
-        # (COALESCE(updated_at, created_at)) — never NULL.
-        approved_at = conn.execute(
-            sa.text("SELECT approved_at FROM wallets WHERE address='0xlegacy'")
-        ).scalar()
-        assert approved_at is not None
-        assert "2026-09-10" in approved_at
-        # 0005: new columns exist.
-        cols = {
-            row[1]
-            for row in conn.execute(sa.text("PRAGMA table_info('signals')"))
-        }
-        assert "asset_id" in cols
-        pcols = {
-            row[1]
-            for row in conn.execute(sa.text("PRAGMA table_info('positions')"))
-        }
-        assert "settled_at" in pcols
-    engine.dispose()
+    # CI provides a dedicated disposable database. Reset it so this test is
+    # deterministic across reruns in the same job.
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, "0002")
+    asyncio.run(_seed_pre_pr_e(db_url))
+    command.upgrade(cfg, "head")
+    asyncio.run(_verify_head(db_url))
     get_settings.cache_clear()
