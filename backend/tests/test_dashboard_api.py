@@ -248,3 +248,28 @@ async def test_health_deps_reports_fresh_and_stale_bot(client, session, monkeypa
     body = client.get("/health/deps").json()
     assert body["status"] == "degraded"
     assert body["checks"]["bot"] == "stale"
+
+
+async def test_position_totals_are_not_limited_to_display_window(client, session):
+    wallet = Wallet(address="0xmany", approval_state="approved")
+    market = Market(condition_id="0xmanymarket", question="Many positions?")
+    session.add_all([wallet, market])
+    await session.flush()
+    session.add_all(
+        [
+            Position(
+                wallet_id=wallet.id,
+                market_id=market.id,
+                outcome=f"O{i}",
+                quantity=Decimal("0"),
+                avg_price=Decimal("0.500000"),
+                realized_pnl=Decimal("1.000000"),
+            )
+            for i in range(501)
+        ]
+    )
+    await session.commit()
+
+    body = client.get("/positions").json()
+    assert body["count"] == 500
+    assert body["totals"]["realized_pnl_usd"] == pytest.approx(501.0)
