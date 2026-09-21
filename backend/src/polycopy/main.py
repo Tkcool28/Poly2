@@ -141,21 +141,30 @@ def _iso(dt) -> str | None:
 
 
 async def _latest_scores(db: AsyncSession, wallet_ids: list[int]) -> dict[int, WalletScore]:
-    """Latest score per wallet id, in one bounded round trip."""
+    """Latest score per requested wallet, without truncating score history."""
     if not wallet_ids:
         return {}
+    ranked = (
+        select(
+            WalletScore.id.label("score_id"),
+            func.row_number()
+            .over(
+                partition_by=WalletScore.wallet_id,
+                order_by=(WalletScore.computed_at.desc(), WalletScore.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(WalletScore.wallet_id.in_(wallet_ids))
+        .subquery()
+    )
     rows = (
         await db.execute(
             select(WalletScore)
-            .where(WalletScore.wallet_id.in_(wallet_ids))
-            .order_by(WalletScore.computed_at.desc())
-            .limit(2000)
+            .join(ranked, WalletScore.id == ranked.c.score_id)
+            .where(ranked.c.rn == 1)
         )
     ).scalars().all()
-    latest: dict[int, WalletScore] = {}
-    for score in rows:  # desc order: first row per wallet wins
-        latest.setdefault(score.wallet_id, score)
-    return latest
+    return {score.wallet_id: score for score in rows}
 
 
 @app.get("/wallets")
