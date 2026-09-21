@@ -23,7 +23,7 @@ UA = {"User-Agent": "polycopy-source-audit/0.1"}
 
 def fetch(url: str) -> object:
     req = Request(url, headers=UA)
-    with urlopen(req, timeout=20) as resp:  # noqa: S310 — public read-only APIs
+    with urlopen(req, timeout=20) as resp:
         return json.loads(resp.read())
 
 

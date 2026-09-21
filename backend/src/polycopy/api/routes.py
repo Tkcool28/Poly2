@@ -22,6 +22,7 @@ from polycopy.models import (
     Wallet,
     WalletScore,
 )
+from polycopy.scoring.service import score_all_wallets
 
 router = APIRouter()
 
@@ -72,6 +73,19 @@ async def get_wallet_score(
     if score is None:
         raise HTTPException(status_code=404, detail="no score for this wallet")
     return _score_payload(score)
+
+
+@router.post("/scoring/run")
+async def run_scoring(db: AsyncSession = Depends(get_db)) -> dict:
+    """Operator-triggered scoring pass over discovered/pending wallets.
+
+    This endpoint is the runtime owner of ``score_all_wallets`` in
+    Chunk 2: candidate discovery is manual, so scoring runs on demand
+    (operator or cron hitting this route), not in the trading bot loop.
+    """
+    verdicts = await score_all_wallets(db)
+    await db.commit()
+    return {"scored": len(verdicts), "verdicts": verdicts}
 
 
 @router.get("/approval-queue")
