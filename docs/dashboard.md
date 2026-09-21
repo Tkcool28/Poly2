@@ -29,7 +29,7 @@ It cannot place trades, change sizing, or touch the kill switch.
 | Activity | `/signals` | Each item embeds market question, wallet, and the paper-order result |
 | Portfolio | `/positions` | Open = `quantity > 0 && settled_at == null`; totals computed server-side |
 | Wallets | `/wallets` | Includes latest composite score per wallet |
-| Review | `/approval-queue`, POST `/wallets/{id}/{action}`, POST `/scoring/run` | The only write path in the UI |
+| Review | `/approval-queue`, POST `/wallets/{id}/{action}`, POST `/scoring/run` | The only write path in the UI; rescoring existing candidates, not wallet discovery |
 
 Backend payloads intentionally carry display context (market question,
 wallet address/label) so the frontend never fans out into N+1 requests
