@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.db import get_db
@@ -64,6 +64,35 @@ async def _latest_score(db: AsyncSession, wallet_id: int) -> WalletScore | None:
     ).scalar_one_or_none()
 
 
+async def _latest_scores(
+    db: AsyncSession, wallet_ids: list[int]
+) -> dict[int, WalletScore]:
+    """Latest score per wallet in one bounded query."""
+    if not wallet_ids:
+        return {}
+    ranked = (
+        select(
+            WalletScore.id.label("score_id"),
+            func.row_number()
+            .over(
+                partition_by=WalletScore.wallet_id,
+                order_by=(WalletScore.computed_at.desc(), WalletScore.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(WalletScore.wallet_id.in_(wallet_ids))
+        .subquery()
+    )
+    scores = (
+        await db.execute(
+            select(WalletScore)
+            .join(ranked, WalletScore.id == ranked.c.score_id)
+            .where(ranked.c.rn == 1)
+        )
+    ).scalars().all()
+    return {score.wallet_id: score for score in scores}
+
+
 @router.get("/wallets/{wallet_id}/score")
 async def get_wallet_score(
     wallet_id: int, db: AsyncSession = Depends(get_db)
@@ -100,9 +129,10 @@ async def list_approval_queue(db: AsyncSession = Depends(get_db)) -> dict:
             .limit(200)
         )
     ).all()
+    scores = await _latest_scores(db, [wallet.id for _, wallet in rows])
     items = []
     for entry, wallet in rows:
-        score = await _latest_score(db, wallet.id)
+        score = scores.get(wallet.id)
         items.append(
             {
                 "entry_id": entry.id,
