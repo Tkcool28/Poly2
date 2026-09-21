@@ -10,9 +10,9 @@ from decimal import Decimal
 import httpx
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import polycopy.execution.service as execution_service
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 os.environ.setdefault("POLYCOPY_ENVIRONMENT", "test")
 # NOTE: the kill switch is flipped per-test via monkeypatch in the
