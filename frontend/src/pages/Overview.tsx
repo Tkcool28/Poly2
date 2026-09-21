@@ -143,7 +143,12 @@ export default function Overview() {
       {/* System status */}
       <h3 className="mb-2 mt-6 text-sm font-semibold text-gray-300">System</h3>
       <div className="rounded-xl bg-gray-900 p-3 text-sm">
-        {health.data ? (
+        {health.error ? (
+          <div className="flex items-center justify-between">
+            <span className="text-gray-400">Bot & database</span>
+            <span className="text-red-400">Health check unavailable</span>
+          </div>
+        ) : health.data ? (
           <div className="flex items-center justify-between">
             <span className="text-gray-400">Bot & database</span>
             <span
