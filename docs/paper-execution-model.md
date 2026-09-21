@@ -19,11 +19,11 @@ worthless.
 
 ```
 source trade observed on-chain/API
-    │  (t₀ = traded_at from source)
+    │  (t₀ = traded_at from source; must be after wallet approval)
     ▼
 detection (t₁ = when our ingestion saw it; detection lag = t₁ − t₀)
     ▼
-decision (t₂ = risk gates + copyability check pass)
+decision (t₂ = fresh per-signal decision/book-attempt timestamp)
     ▼
 market snapshot at t₂: current order book for the CLOB token
     ▼
@@ -117,3 +117,15 @@ sizing later.
 - That detection is instant. Detection lag is measured and reported, not
   assumed away.
 - That every signal fills. Missed fills are data.
+
+
+## Position ownership
+
+Paper inventory is **source-wallet-scoped**: a position is identified by
+source wallet + market + outcome. This prevents one followed wallet's SELL
+from consuming another followed wallet's copied shares and preserves
+per-wallet paper performance attribution.
+
+A trade is copy-eligible only when both its source `traded_at` and Poly2
+`ingested_at` timestamps are at/after the wallet's `approved_at` boundary.
+Late ingestion can therefore never revive pre-approval source activity.
