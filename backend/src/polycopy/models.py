@@ -239,8 +239,17 @@ class PaperOrder(Base):
 
 class Position(Base):
     __tablename__ = "positions"
+    __table_args__ = (
+        UniqueConstraint(
+            "wallet_id", "market_id", "outcome",
+            name="uq_positions_wallet_market_outcome",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Paper inventory is scoped to the source wallet being copied. Without
+    # this key, one wallet's SELL could consume another wallet's paper shares.
+    wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"), index=True)
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
     outcome: Mapped[str] = mapped_column(String(40))
     quantity: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
