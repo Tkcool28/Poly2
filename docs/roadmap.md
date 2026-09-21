@@ -27,7 +27,12 @@
 7. [x] Tailing daemon (REST polling at `ingestion_poll_interval_seconds`;
    WebSocket upgrade deferred — evidence first)
 8. [x] Realistic paper execution per `docs/paper-execution-model.md`
-   (detection-lag → order book → slippage → partial/no-fill) — PR-E
+   (detection-lag → order book → slippage → partial/no-fill) — PR-E,
+   incl. the PR #7 final hardening pass (review delay, asset_id token
+   identity, defer-not-consume kill switch, execution-time approval
+   recheck, fee-consistent accounting, malformed-book rejection,
+   per-signal failure isolation, bounded cycles, paper settlement at
+   resolution, populated-schema migration safety)
 9. [ ] Dashboard wired to real data — PR-F (next)
 
 ## Chunk 3 — Live trading (separate, gated PR)
@@ -38,7 +43,3 @@
   permissions, private-key storage, backup encryption, no secrets in images
   or git, credential rotation
 - Ops gate: DB growth/disk monitoring, WAL management, log rotation,
-  backup/restore drills, retention policy
-- Order cancellation, execution reconciliation, recovery behavior, alerts,
-  canary deployment, live-readiness review
-- Only after sustained profitable paper results justify it
