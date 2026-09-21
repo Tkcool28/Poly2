@@ -10,6 +10,8 @@ from decimal import Decimal
 import httpx
 import pytest
 from sqlalchemy import func, select
+
+import polycopy.execution.service as execution_service
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 os.environ.setdefault("POLYCOPY_ENVIRONMENT", "test")
@@ -93,6 +95,7 @@ async def _seed_approved_trade(
     token_ids=None,
     approved_at=None,
     ingested_at=None,
+    traded_at=None,
     asset_id="4667",
 ) -> Trade:
     wallet = Wallet(
@@ -125,7 +128,7 @@ async def _seed_approved_trade(
         size=5,
         price=price,
         fee=0,
-        traded_at=NOW - timedelta(minutes=3),
+        traded_at=traded_at or (NOW - timedelta(minutes=3)),
         ingested_at=ingested_at or NOW,
     )
     session.add(trade)
@@ -281,6 +284,21 @@ async def test_no_signals_from_pre_approval_trades(session):
         "data-api:0xnew:0xhist:4667:5:0.4:2"
 
 
+async def test_source_trade_before_approval_is_never_copyable(session):
+    """Final audit: late ingestion must not revive a source trade that
+    actually happened before the wallet was approved."""
+    approved_at = NOW - timedelta(hours=1)
+    await _seed_approved_trade(
+        session,
+        address="0xlate",
+        approved_at=approved_at,
+        traded_at=NOW - timedelta(hours=2),
+        ingested_at=NOW,
+    )
+    assert await detect_signals(session, now=NOW) == 0
+    assert await session.scalar(select(func.count(Signal.id))) == 0
+
+
 async def test_price_zone_gate_uses_execution_price_not_source(session):
     """PR #7 REVIEW REGRESSION: source_price is evidence, not the gate.
 
@@ -334,6 +352,7 @@ async def test_sell_capped_to_owned_position_and_positions_agree(session):
     # We own only 5 shares; the $10 target at 0.48 wants ~20.8.
     session.add(
         Position(
+            wallet_id=signal.wallet_id,
             market_id=signal.market_id, outcome="Up",
             quantity=5, avg_price=0.40, realized_pnl=0, unrealized_pnl=0,
         )
@@ -357,6 +376,7 @@ async def test_sell_normal_position_uses_normal_sizing(session):
     signal = (await session.execute(select(Signal))).scalar_one()
     session.add(
         Position(
+            wallet_id=signal.wallet_id,
             market_id=signal.market_id, outcome="Up",
             quantity=100, avg_price=0.40, realized_pnl=0, unrealized_pnl=0,
         )
@@ -419,6 +439,7 @@ async def test_exposure_cap_blocks_oversize(session, monkeypatch):
     # Existing $12 position in the same market + $10 order > $15 cap.
     session.add(
         Position(
+            wallet_id=signal.wallet_id,
             market_id=signal.market_id, outcome="Up", quantity=24, avg_price=0.50
         )
     )
@@ -704,6 +725,69 @@ async def test_execution_backlog_is_bounded(session, monkeypatch):
     assert requests["n"] == 2  # deterministic max CLOB requests
 
 
+async def test_positions_are_isolated_by_source_wallet(session):
+    """Final audit: one source wallet's SELL cannot consume another
+    source wallet's copied inventory in the same market/outcome."""
+    buy_trade = await _seed_approved_trade(session, address="0xwalleta")
+    await detect_signals(session, now=NOW)
+    buy_signal = (await session.execute(
+        select(Signal).where(Signal.wallet_id == buy_trade.wallet_id)
+    )).scalar_one()
+    async with _make_client() as client:
+        await execute_signal(session, client, buy_signal)
+
+    position_a = (await session.execute(
+        select(Position).where(Position.wallet_id == buy_trade.wallet_id)
+    )).scalar_one()
+    qty_before = Decimal(str(position_a.quantity))
+
+    sell_trade = await _seed_approved_trade(
+        session, address="0xwalletb", side="SELL", traded_at=NOW
+    )
+    sell_trade.market_id = buy_signal.market_id
+    await session.commit()
+    await detect_signals(session, now=NOW)
+    sell_signal = (await session.execute(
+        select(Signal).where(Signal.wallet_id == sell_trade.wallet_id)
+    )).scalar_one()
+
+    async with _make_client() as client:
+        order = await execute_signal(session, client, sell_signal)
+
+    assert order.status == "missed"
+    assert order.miss_reason == "no_position_to_sell"
+    await session.refresh(position_a)
+    assert Decimal(str(position_a.quantity)) == qty_before
+
+
+async def test_run_cycle_records_fresh_t2_per_signal(session, monkeypatch):
+    """Final audit: t2 is captured per signal, not once for the batch."""
+    await _seed_approved_trade(session, address="0xt2a")
+    await _seed_approved_trade(session, address="0xt2b")
+
+    ticks = iter([
+        NOW + timedelta(minutes=1),
+        NOW + timedelta(minutes=1, seconds=1),
+        NOW + timedelta(minutes=1, seconds=2),
+    ])
+
+    class FakeDateTime:
+        @classmethod
+        def now(cls, tz=None):
+            return next(ticks)
+
+    monkeypatch.setattr(execution_service, "datetime", FakeDateTime)
+    async with _make_client() as client:
+        stats = await run_execution_cycle(session, client)
+
+    assert stats["filled"] == 2
+    orders = (await session.execute(
+        select(PaperOrder).order_by(PaperOrder.id)
+    )).scalars().all()
+    assert len(orders) == 2
+    assert orders[0].t2_decided_at != orders[1].t2_decided_at
+
+
 async def test_paper_settlement_winner_loser_idempotent(session):
     """HARDENING #13: open paper positions realize at $1/$0 exactly once
     when the market resolves — repeated cycles are no-ops."""
@@ -719,10 +803,10 @@ async def test_paper_settlement_winner_loser_idempotent(session):
     session.add(market)
     await session.flush()
     # Winner: 10 shares "Up" at avg 0.60 (cost 6.00) → +4.00.
-    win = Position(market_id=market.id, outcome="Up", quantity=10,
+    win = Position(wallet_id=wallet.id, market_id=market.id, outcome="Up", quantity=10,
                    avg_price=Decimal("0.6"), realized_pnl=0, unrealized_pnl=0)
     # Loser: 5 shares "Down" at avg 0.30 (cost 1.50) → −1.50.
-    lose = Position(market_id=market.id, outcome="Down", quantity=5,
+    lose = Position(wallet_id=wallet.id, market_id=market.id, outcome="Down", quantity=5,
                     avg_price=Decimal("0.3"), realized_pnl=0, unrealized_pnl=0)
     session.add_all([win, lose])
     session.add(Settlement(market_id=market.id, winning_outcome="Up"))
