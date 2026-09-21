@@ -108,3 +108,27 @@ def test_max_shares_none_is_uncapped():
     result, _ = walk_book("BUY", D("10"), [], asks, max_shares=None)
     assert result.filled_size == D("20")
     assert result.status == "filled"
+
+
+def test_invalid_levels_are_never_walked():
+    """PR #7 HARDENING #10: even called directly, walk_book filters
+    economically invalid levels — no division-by-zero, no NaN VWAP."""
+    bad = Decimal(0)
+    asks = [
+        BookLevel(price=bad, size=Decimal(10)),          # zero price
+        BookLevel(price=Decimal("-0.5"), size=Decimal(10)),
+        BookLevel(price=Decimal("1.5"), size=Decimal(10)),  # above max
+        BookLevel(price=Decimal("0.5"), size=Decimal(0)),   # zero size
+        BookLevel(price=Decimal("nan"), size=Decimal(10)),
+        BookLevel(price=Decimal("inf"), size=Decimal(10)),
+        BookLevel(price=Decimal("0.50"), size=Decimal(40)),  # the one good
+    ]
+    result, _fee = walk_book("BUY", Decimal(10), [], asks)
+    assert result.status == "filled"
+    assert result.fill_price == Decimal("0.5")
+    assert result.depth_available == Decimal(40)  # good levels only
+
+    # All-bad book → missed, never a crash.
+    result2, _ = walk_book("BUY", Decimal(10), [], asks[:-1])
+    assert result2.status == "missed"
+    assert result2.fill_price is None
