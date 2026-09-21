@@ -9,7 +9,7 @@ extra round trips.
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -25,6 +25,7 @@ from polycopy.models import (
     Market,
     PaperOrder,
     Position,
+    ServiceHeartbeat,
     Signal,
     Wallet,
     WalletScore,
@@ -201,3 +202,49 @@ async def test_settled_position_moves_out_of_open_totals(client, session):
     assert totals["open_count"] == 1
     assert totals["settled_count"] == 1
     assert totals["realized_pnl_usd"] == pytest.approx(4.0)
+
+
+class _FakeRedis:
+    async def ping(self):
+        return True
+
+    async def aclose(self):
+        return None
+
+
+async def test_health_deps_reports_missing_bot_heartbeat(client, monkeypatch):
+    import polycopy.main as main_module
+
+    monkeypatch.setattr(
+        main_module.aioredis,
+        "from_url",
+        lambda *args, **kwargs: _FakeRedis(),
+    )
+    body = client.get("/health/deps").json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["postgres"] == "ok"
+    assert body["checks"]["redis"] == "ok"
+    assert body["checks"]["bot"] == "missing"
+
+
+async def test_health_deps_reports_fresh_and_stale_bot(client, session, monkeypatch):
+    import polycopy.main as main_module
+
+    monkeypatch.setattr(
+        main_module.aioredis,
+        "from_url",
+        lambda *args, **kwargs: _FakeRedis(),
+    )
+
+    fresh = ServiceHeartbeat(service="bot", seen_at=datetime.now(UTC))
+    session.add(fresh)
+    await session.commit()
+    body = client.get("/health/deps").json()
+    assert body["status"] == "ok"
+    assert body["checks"]["bot"] == "ok"
+
+    fresh.seen_at = datetime.now(UTC) - timedelta(minutes=5)
+    await session.commit()
+    body = client.get("/health/deps").json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["bot"] == "stale"
