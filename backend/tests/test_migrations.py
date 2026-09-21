@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
-
 from alembic import command
 from alembic.config import Config
 
