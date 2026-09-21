@@ -7,6 +7,20 @@ on:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: polycopy
+          POSTGRES_DB: polycopy_test
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U polycopy -d polycopy_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -17,6 +31,8 @@ jobs:
       - name: Ruff
         run: ruff check backend/src backend/tests
       - name: Pytest
+        env:
+          POLYCOPY_TEST_POSTGRES_URL: postgresql+asyncpg://polycopy@localhost:5432/polycopy_test
         run: cd backend && pytest
 
   frontend:
