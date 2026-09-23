@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Poly2 PostgreSQL backup
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 UTC
+Persistent=true
+Unit=poly2-backup.service
+
+[Install]
+WantedBy=timers.target

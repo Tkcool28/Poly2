@@ -52,6 +52,9 @@ host Caddy endpoint (with the appropriate credentials):
 /api/approval-queue
 ```
 
+Production reboot, update, backup, restore-drill, logging, and systemd
+procedures are in [production operations](docs/production-operations.md).
+
 ## Stack
 
 | Piece | Tech |

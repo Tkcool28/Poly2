@@ -1,6 +1,12 @@
 services:
   postgres:
     image: postgres:15-alpine
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     environment:
       POSTGRES_USER: ${POLYCOPY_POSTGRES_USER:?Set POLYCOPY_POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POLYCOPY_POSTGRES_PASSWORD:?Set POLYCOPY_POSTGRES_PASSWORD in .env}
@@ -15,6 +21,12 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -34,6 +46,12 @@ services:
 
   backend:
     build: ./backend
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     env_file:
       - path: .env
         required: false
@@ -52,6 +70,12 @@ services:
 
   bot:
     build: ./backend
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     command: ["python", "-m", "polycopy.bot.daemon"]
     env_file:
       - path: .env
@@ -62,11 +86,28 @@ services:
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     depends_on:
       - backend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   nginx:
     image: nginx:1.27-alpine
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     ports:
       - "${POLYCOPY_BIND_ADDRESS:-127.0.0.1}:${POLYCOPY_HTTP_PORT:-8790}:80"
     volumes:
@@ -74,6 +115,11 @@ services:
     depends_on:
       - backend
       - frontend
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres_data:
