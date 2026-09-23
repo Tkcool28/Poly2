@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import polycopy.bot.daemon as daemon
+from polycopy.bot import daemon
 
 
 @pytest.mark.asyncio

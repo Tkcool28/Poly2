@@ -55,7 +55,7 @@ async def _write_heartbeat(maker, service: str) -> None:
 async def _write_heartbeat_safely(maker, service: str, logger) -> None:
     try:
         await _write_heartbeat(maker, service)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         decision = _cycle_failure_throttle.record(
             ("heartbeat", service, type(exc).__name__, str(exc))
         )
@@ -122,7 +122,7 @@ async def run() -> None:
                     await _write_heartbeat_safely(maker, "bot_success", logger)
                     _cycle_failure_throttle.clear_prefix("cycle_exception")
                 logger.info("bot_cycle", degraded=degraded, **stats)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 await _write_heartbeat_safely(maker, "bot_failure", logger)
                 signature = ("cycle_exception", type(exc).__name__, str(exc))
                 decision = _cycle_failure_throttle.record(signature)

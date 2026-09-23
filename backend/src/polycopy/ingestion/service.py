@@ -26,12 +26,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.config import get_settings
+from polycopy.failure_throttle import FailureLogThrottle
 from polycopy.ingestion.client import (
     PolymarketAPIError,
     PolymarketClient,
     clob_token_map,
 )
-from polycopy.failure_throttle import FailureLogThrottle
 from polycopy.ingestion.identity import canonical_trade_id
 from polycopy.logging_config import get_logger
 from polycopy.models import DecisionLogEntry, Market, Trade, Wallet
@@ -223,7 +223,7 @@ async def ingest_wallet_trades(
                     )
                 )
                 await session.flush()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             quarantined += 1
             _record_quarantine(
                 session,
@@ -268,7 +268,7 @@ async def run_ingestion_cycle(
             result = await ingest_wallet_trades(session, client, wallet)
             results[wallet.address] = result.inserted
             quarantined_rows += result.quarantined
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             failed_wallets += 1
             await session.rollback()
             results[wallet.address] = 0
