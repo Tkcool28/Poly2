@@ -115,7 +115,7 @@ export default function Wallets() {
           disabled={adding}
           className="mt-3 min-h-[48px] w-full rounded-xl bg-blue-700 font-semibold text-white active:bg-blue-600 disabled:opacity-40"
         >
-          {adding ? "Adding…” : "Add wallet"}
+          {adding ? "Adding…" : "Add wallet"}
         </button>
         {addMsg && (
           <div
