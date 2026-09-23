@@ -98,8 +98,17 @@ export interface ApprovalItem {
   } | null;
 }
 
-async function request<T>(path: string, method = "GET"): Promise<T> {
-  const resp = await fetch(`${BASE}${path}`, { method });
+async function request<T>(
+  path: string,
+  method = "GET",
+  body?: unknown,
+): Promise<T> {
+  const resp = await fetch(`${BASE}${path}`, {
+    method,
+    ...(body !== undefined
+      ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+      : {}),
+  });
   if (!resp.ok) throw new Error(`API ${path}: ${resp.status}`);
   return resp.json() as Promise<T>;
 }
@@ -112,6 +121,13 @@ export const api = {
   positions: () => request<PositionsResponse>("/positions"),
   approvalQueue: () =>
     request<{ items: ApprovalItem[]; count: number }>("/approval-queue"),
+  addWallet: (address: string, label?: string) =>
+    request<{
+      id: number;
+      address: string;
+      label: string | null;
+      approval_state: string;
+    }>("/wallets", "POST", { address, label: label || null }),
   walletAction: (walletId: number, action: "approve" | "reject" | "disable") =>
     request<{ wallet_id: number; approval_state: string }>(
       `/wallets/${walletId}/${action}`,
