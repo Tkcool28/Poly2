@@ -210,7 +210,7 @@ class PaperOrder(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    idempotency_key: Mapped[str] = mapped_column(String(200))
+    idempotency_key: Mapped[str] = mapped_column(Text)
     signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"))
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"))
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"))

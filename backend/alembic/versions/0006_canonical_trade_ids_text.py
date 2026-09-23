@@ -7,7 +7,8 @@ Create Date: 2026-09-23
 The Data API canonical key concatenates transaction hash, proxy wallet,
 asset/token ID, normalized size/price, and timestamp. Upstream does not
 publish a safe aggregate maximum and real-format keys exceed VARCHAR(160).
-The same canonical identity flows into signals.source_trade_id, so both
+The same canonical identity flows into signals.source_trade_id and into
+paper_orders.idempotency_key as "paper:{source_trade_id}", so all three
 surfaces must stay aligned.
 """
 
@@ -37,11 +38,25 @@ def upgrade() -> None:
         existing_type=sa.String(160),
         existing_nullable=False,
     )
+    op.alter_column(
+        "paper_orders",
+        "idempotency_key",
+        type_=sa.Text(),
+        existing_type=sa.String(200),
+        existing_nullable=False,
+    )
 
 
 def downgrade() -> None:
-    # PostgreSQL will fail rather than truncate if rows longer than 160
-    # exist. That is intentional: downgrades must never destroy identity.
+    # PostgreSQL will fail rather than truncate if rows exceed the historical
+    # limits. That is intentional: downgrades must never destroy identity.
+    op.alter_column(
+        "paper_orders",
+        "idempotency_key",
+        type_=sa.String(200),
+        existing_type=sa.Text(),
+        existing_nullable=False,
+    )
     op.alter_column(
         "signals",
         "source_trade_id",
