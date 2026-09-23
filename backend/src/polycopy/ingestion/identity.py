@@ -41,7 +41,11 @@ def canonical_trade_id(trade: dict[str, Any]) -> str:
     """Composite canonical key for one Data API trade object.
 
     Format: data-api:{txHash}:{proxyWallet}:{asset}:{size}:{price}:{timestamp}
-    Max realistic length fits String(160) (migration 0002).
+
+    This identifier is intentionally treated as variable-length text. The
+    upstream API does not publish a safe maximum for every component, and
+    real token IDs make the composite exceed the historical VARCHAR(160)
+    assumption.
     """
     required = ("transactionHash", "proxyWallet", "asset", "size", "price", "timestamp")
     missing = [k for k in required if trade.get(k) is None]

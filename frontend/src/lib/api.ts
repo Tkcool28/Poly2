@@ -30,6 +30,8 @@ export interface WalletItem {
   approved_at: string | null;
   created_at: string | null;
   composite_score: number | null;
+  score_verdict: string | null;
+  score_computed_at: string | null;
 }
 
 export interface PaperOrderSummary {

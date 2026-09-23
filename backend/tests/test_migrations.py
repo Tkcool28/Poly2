@@ -74,6 +74,16 @@ async def _verify(db_url: str) -> None:
             "AND column_name='source_trade_id'"
         )
         assert await conn.fetchval(
+            "SELECT data_type = 'text' FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='trades' "
+            "AND column_name='polymarket_trade_id'"
+        )
+        assert await conn.fetchval(
+            "SELECT data_type = 'text' FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='signals' "
+            "AND column_name='source_trade_id'"
+        )
+        assert await conn.fetchval(
             "SELECT approved_at IS NOT NULL FROM wallets WHERE address='0xlegacy'"
         )
         cols = {

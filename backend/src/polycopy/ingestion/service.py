@@ -18,6 +18,7 @@ client and an in-memory session.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,9 +31,10 @@ from polycopy.ingestion.client import (
     PolymarketClient,
     clob_token_map,
 )
+from polycopy.failure_throttle import FailureLogThrottle
 from polycopy.ingestion.identity import canonical_trade_id
 from polycopy.logging_config import get_logger
-from polycopy.models import Market, Trade, Wallet
+from polycopy.models import DecisionLogEntry, Market, Trade, Wallet
 
 logger = get_logger("polycopy.ingestion.service")
 
@@ -81,37 +83,110 @@ async def _get_or_create_market(
     return market
 
 
+@dataclass(frozen=True)
+class WalletIngestionResult:
+    inserted: int
+    quarantined: int
+
+
+@dataclass(frozen=True)
+class IngestionCycleResult:
+    wallets: dict[str, int]
+    failed_wallets: int
+    quarantined_rows: int
+
+
+_row_failure_throttle = FailureLogThrottle(trace_interval_seconds=300.0, summary_every=20)
+_wallet_failure_throttle = FailureLogThrottle(trace_interval_seconds=300.0, summary_every=20)
+
+
+def _identity_context(raw: dict[str, Any]) -> dict[str, str | None]:
+    keys = ("transactionHash", "proxyWallet", "asset", "conditionId", "timestamp")
+    return {key: (str(raw[key]) if raw.get(key) is not None else None) for key in keys}
+
+
+def _record_quarantine(
+    session: AsyncSession,
+    *,
+    wallet: Wallet,
+    reason: str,
+    error: Exception,
+    raw: dict[str, Any],
+    canonical_id: str | None = None,
+) -> None:
+    signature = (
+        wallet.address,
+        reason,
+        type(error).__name__,
+        str(error),
+        canonical_id or str(raw.get("transactionHash") or ""),
+    )
+    decision = _row_failure_throttle.record(signature)
+    if not (decision.full_trace or decision.emit_summary):
+        return
+
+    fields = {
+        "wallet": wallet.address,
+        "reason": reason,
+        "error_type": type(error).__name__,
+        "error": str(error),
+        "identity": _identity_context(raw),
+        "canonical_trade_id": canonical_id,
+        "repeat_count": decision.repeat_count,
+    }
+    if decision.full_trace:
+        logger.exception("trade_ingest_quarantined", **fields)
+    else:
+        logger.warning("trade_ingest_quarantined_repeated", **fields)
+
+    session.add(
+        DecisionLogEntry(
+            actor="bot",
+            action="trade_ingest_quarantined",
+            context=fields,
+        )
+    )
+
+
 async def ingest_wallet_trades(
     session: AsyncSession,
     client: PolymarketClient,
     wallet: Wallet,
     *,
     fetch_market_metadata: bool = True,
-) -> int:
+) -> WalletIngestionResult:
     """Ingest one bounded batch of trades for one wallet.
 
-    Returns the number of NEW trades inserted. Bounded by
-    ``POLYCOPY_INGESTION_BATCH_SIZE`` — one API page, no unbounded loops.
+    Each row is flushed inside a SAVEPOINT. A permanently bad row rolls back
+    only itself; it cannot poison the outer wallet transaction or later rows.
     """
     settings = get_settings()
     raw_trades = await client.get_trades(
         wallet.address, limit=settings.ingestion_batch_size
     )
     if not raw_trades:
-        return 0
+        return WalletIngestionResult(inserted=0, quarantined=0)
 
-    # Dedup within the batch AND against the DB in one lookup.
     keyed: dict[str, dict[str, Any]] = {}
+    quarantined = 0
     for raw in raw_trades:
         try:
             key = canonical_trade_id(raw)
-        except ValueError as exc:
-            logger.warning("trade_missing_identity", error=str(exc), wallet=wallet.address)
+        except (ValueError, ArithmeticError) as exc:
+            quarantined += 1
+            _record_quarantine(
+                session,
+                wallet=wallet,
+                reason="invalid_identity",
+                error=exc,
+                raw=raw,
+            )
             continue
         keyed.setdefault(key, raw)
 
     if not keyed:
-        return 0
+        await session.commit()
+        return WalletIngestionResult(inserted=0, quarantined=quarantined)
 
     existing = (
         await session.execute(
@@ -120,30 +195,45 @@ async def ingest_wallet_trades(
             )
         )
     ).scalars().all()
-    new_keys = [k for k in keyed if k not in set(existing)]
+    existing_set = set(existing)
+    new_keys = [key for key in keyed if key not in existing_set]
 
     inserted = 0
     for key in new_keys:
         raw = keyed[key]
-        market = await _get_or_create_market(
-            session,
-            client,
-            str(raw["conditionId"]),
-            fetch_metadata=fetch_market_metadata,
-        )
-        session.add(
-            Trade(
-                polymarket_trade_id=key,
-                market_id=market.id,
-                wallet_id=wallet.id,
-                asset_id=str(raw.get("asset") or ""),
-                side=str(raw["side"]).upper(),
-                outcome=str(raw.get("outcome") or ""),
-                size=raw["size"],
-                price=raw["price"],
-                traded_at=_parse_traded_at(raw),
+        try:
+            async with session.begin_nested():
+                market = await _get_or_create_market(
+                    session,
+                    client,
+                    str(raw["conditionId"]),
+                    fetch_metadata=fetch_market_metadata,
+                )
+                session.add(
+                    Trade(
+                        polymarket_trade_id=key,
+                        market_id=market.id,
+                        wallet_id=wallet.id,
+                        asset_id=str(raw.get("asset") or ""),
+                        side=str(raw["side"]).upper(),
+                        outcome=str(raw.get("outcome") or ""),
+                        size=raw["size"],
+                        price=raw["price"],
+                        traded_at=_parse_traded_at(raw),
+                    )
+                )
+                await session.flush()
+        except Exception as exc:  # noqa: BLE001
+            quarantined += 1
+            _record_quarantine(
+                session,
+                wallet=wallet,
+                reason="row_persistence_failed",
+                error=exc,
+                raw=raw,
+                canonical_id=key,
             )
-        )
+            continue
         inserted += 1
 
     await session.commit()
@@ -152,9 +242,10 @@ async def ingest_wallet_trades(
         wallet=wallet.address,
         fetched=len(raw_trades),
         new=inserted,
-        skipped_duplicates=len(keyed) - inserted,
+        quarantined=quarantined,
+        skipped_duplicates=len(keyed) - len(new_keys),
     )
-    return inserted
+    return WalletIngestionResult(inserted=inserted, quarantined=quarantined)
 
 
 async def run_ingestion_cycle(
@@ -162,24 +253,46 @@ async def run_ingestion_cycle(
     client: PolymarketClient,
     *,
     include_unapproved: bool = True,
-) -> dict[str, int]:
-    """One bounded ingestion pass over tracked wallets.
-
-    Wallets are processed SEQUENTIALLY — concurrency is capped inside the
-    client, and serial wallet processing keeps DB pressure flat (the VPS
-    OOM lesson). Returns {wallet_address: new_trade_count}.
-    """
+) -> IngestionCycleResult:
+    """One bounded ingestion pass over tracked wallets with failure isolation."""
     stmt = select(Wallet)
     if not include_unapproved:
         stmt = stmt.where(Wallet.approval_state == "approved")
     wallets = (await session.execute(stmt)).scalars().all()
 
     results: dict[str, int] = {}
+    failed_wallets = 0
+    quarantined_rows = 0
     for wallet in wallets:
         try:
-            results[wallet.address] = await ingest_wallet_trades(session, client, wallet)
-        except Exception:
-            logger.exception("ingest_wallet_failed", wallet=wallet.address)
+            result = await ingest_wallet_trades(session, client, wallet)
+            results[wallet.address] = result.inserted
+            quarantined_rows += result.quarantined
+        except Exception as exc:  # noqa: BLE001
+            failed_wallets += 1
             await session.rollback()
             results[wallet.address] = 0
-    return results
+            signature = (wallet.address, type(exc).__name__, str(exc))
+            decision = _wallet_failure_throttle.record(signature)
+            if decision.full_trace:
+                logger.exception(
+                    "ingest_wallet_failed",
+                    wallet=wallet.address,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    repeat_count=decision.repeat_count,
+                )
+            elif decision.emit_summary:
+                logger.warning(
+                    "ingest_wallet_failed_repeated",
+                    wallet=wallet.address,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    repeat_count=decision.repeat_count,
+                )
+
+    return IngestionCycleResult(
+        wallets=results,
+        failed_wallets=failed_wallets,
+        quarantined_rows=quarantined_rows,
+    )

@@ -159,9 +159,17 @@ export default function Wallets() {
                 </div>
                 <div className="mt-2 flex items-center justify-between text-xs text-gray-500">
                   <span>
-                    {w.composite_score != null
-                      ? `score ${w.composite_score.toFixed(0)}/100`
-                      : "not scored yet"}
+                    {w.approval_state === "pending_review"
+                      ? "Pending human review"
+                      : w.composite_score != null
+                        ? `score ${w.composite_score.toFixed(0)}/100`
+                        : w.score_verdict === "insufficient_history"
+                          ? "Insufficient history"
+                          : w.score_verdict === "score_rejected"
+                            ? "Scored — did not qualify"
+                            : w.score_computed_at
+                              ? "Scored — no numeric score"
+                              : "Not scored yet"}
                     {w.approved_at &&
                       ` • following since ${timeAgo(w.approved_at)}`}
                   </span>

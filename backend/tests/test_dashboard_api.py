@@ -66,7 +66,11 @@ async def _seed(session):
     session.add_all([wallet, market])
     await session.flush()
     session.add(
-        WalletScore(wallet_id=wallet.id, composite_score=88.0, behavioral_tags=[])
+        WalletScore(
+            wallet_id=wallet.id,
+            composite_score=88.0,
+            behavioral_tags=[{"verdict": "pending_review"}],
+        )
     )
     signal = Signal(
         wallet_id=wallet.id,
@@ -120,12 +124,16 @@ async def test_wallets_carry_latest_score_and_timestamps(client, session):
     assert item["label"] == "Sharp bettor"
     assert item["approval_state"] == "approved"
     assert item["composite_score"] == 88.0
+    assert item["score_verdict"] == "pending_review"
+    assert item["score_computed_at"] is not None
     assert item["approved_at"].startswith("2026-09-01")
     # A wallet with no score reports null, not a crash.
     session.add(Wallet(address="0xnosc"))
     await session.commit()
     items = {i["address"]: i for i in client.get("/wallets").json()["items"]}
     assert items["0xnosc"]["composite_score"] is None
+    assert items["0xnosc"]["score_verdict"] is None
+    assert items["0xnosc"]["score_computed_at"] is None
 
 
 async def test_signals_carry_context_and_copy_result(client, session):
@@ -227,7 +235,9 @@ async def test_health_deps_reports_missing_bot_heartbeat(client, monkeypatch):
     assert body["checks"]["bot"] == "missing"
 
 
-async def test_health_deps_reports_fresh_and_stale_bot(client, session, monkeypatch):
+async def test_health_deps_distinguishes_alive_from_failing_cycle(
+    client, session, monkeypatch
+):
     import polycopy.main as main_module
 
     monkeypatch.setattr(
@@ -236,18 +246,51 @@ async def test_health_deps_reports_fresh_and_stale_bot(client, session, monkeypa
         lambda *args, **kwargs: _FakeRedis(),
     )
 
-    fresh = ServiceHeartbeat(service="bot", seen_at=datetime.now(UTC))
-    session.add(fresh)
+    now = datetime.now(UTC)
+    session.add_all(
+        [
+            ServiceHeartbeat(service="bot_alive", seen_at=now),
+            ServiceHeartbeat(service="bot_success", seen_at=now - timedelta(minutes=2)),
+            ServiceHeartbeat(service="bot_failure", seen_at=now),
+        ]
+    )
     await session.commit()
+
+    body = client.get("/health/deps").json()
+    assert body["status"] == "degraded"
+    assert body["checks"]["bot"] == "ok"
+    assert body["checks"]["bot_cycle"] == "failing"
+    assert body["heartbeat"]["process_seen_at"] is not None
+    assert body["heartbeat"]["last_success_at"] is not None
+    assert body["heartbeat"]["last_failure_at"] is not None
+
+
+async def test_health_deps_reports_clean_then_stale_cycle(client, session, monkeypatch):
+    import polycopy.main as main_module
+
+    monkeypatch.setattr(
+        main_module.aioredis,
+        "from_url",
+        lambda *args, **kwargs: _FakeRedis(),
+    )
+
+    now = datetime.now(UTC)
+    alive = ServiceHeartbeat(service="bot_alive", seen_at=now)
+    success = ServiceHeartbeat(service="bot_success", seen_at=now)
+    session.add_all([alive, success])
+    await session.commit()
+
     body = client.get("/health/deps").json()
     assert body["status"] == "ok"
     assert body["checks"]["bot"] == "ok"
+    assert body["checks"]["bot_cycle"] == "ok"
 
-    fresh.seen_at = datetime.now(UTC) - timedelta(minutes=5)
+    success.seen_at = now - timedelta(minutes=5)
     await session.commit()
     body = client.get("/health/deps").json()
     assert body["status"] == "degraded"
-    assert body["checks"]["bot"] == "stale"
+    assert body["checks"]["bot"] == "ok"
+    assert body["checks"]["bot_cycle"] == "stale"
 
 
 async def test_position_totals_are_not_limited_to_display_window(client, session):
@@ -306,3 +349,30 @@ async def test_wallet_latest_score_is_per_wallet_not_global_history_limit(client
     items = {i["address"]: i for i in client.get("/wallets").json()["items"]}
     assert items["0xquiet"]["composite_score"] == pytest.approx(91.0)
     assert items["0xnoisy"]["composite_score"] == pytest.approx(0.0)
+
+
+async def test_wallet_insufficient_history_is_distinct_from_never_scored(client, session):
+    insufficient = Wallet(address="0xinsufficient", approval_state="discovered")
+    never = Wallet(address="0xnever", approval_state="discovered")
+    session.add_all([insufficient, never])
+    await session.flush()
+    session.add(
+        WalletScore(
+            wallet_id=insufficient.id,
+            composite_score=None,
+            behavioral_tags=[
+                {
+                    "verdict": "insufficient_history",
+                    "gate_failures": ["trades 0 < 30"],
+                }
+            ],
+        )
+    )
+    await session.commit()
+
+    items = {item["address"]: item for item in client.get("/wallets").json()["items"]}
+    assert items["0xinsufficient"]["composite_score"] is None
+    assert items["0xinsufficient"]["score_verdict"] == "insufficient_history"
+    assert items["0xinsufficient"]["score_computed_at"] is not None
+    assert items["0xnever"]["score_verdict"] is None
+    assert items["0xnever"]["score_computed_at"] is None
