@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.db import get_db
@@ -112,10 +113,17 @@ async def add_wallet(body: WalletCreateIn, db: AsyncSession = Depends(get_db)) -
     ingestion starts tailing them for scoring, but nothing becomes
     copyable until a human approves them through the review queue.
     Addresses are normalized to lowercase; duplicates are rejected.
+    Existence checks are CASE-INSENSITIVE (``func.lower``) because rows
+    seeded before normalization may hold mixed-case addresses, and the
+    ``wallets.address`` unique constraint is case-sensitive in Postgres.
+    A concurrent duplicate insert that slips past the check is caught by
+    the unique constraint and converted to a clean 409, never a 500.
     """
     address = body.address.lower()
     existing = (
-        await db.execute(select(Wallet).where(Wallet.address == address))
+        await db.execute(
+            select(Wallet).where(func.lower(Wallet.address) == address)
+        )
     ).scalar_one_or_none()
     if existing is not None:
         raise HTTPException(
@@ -126,7 +134,25 @@ async def add_wallet(body: WalletCreateIn, db: AsyncSession = Depends(get_db)) -
 
     wallet = Wallet(address=address, label=body.label, approval_state="discovered")
     db.add(wallet)
-    await db.flush()
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Lost a duplicate race: another request inserted the same address
+        # between our check and our flush. Roll back and re-check so the
+        # caller gets the same clean 409 as the sequential path.
+        await db.rollback()
+        winner = (
+            await db.execute(
+                select(Wallet).where(func.lower(Wallet.address) == address)
+            )
+        ).scalar_one_or_none()
+        if winner is None:
+            raise  # a genuinely different constraint violation — not ours
+        raise HTTPException(
+            status_code=409,
+            detail=f"wallet {address} is already tracked "
+            f"(state: {winner.approval_state})",
+        )
     db.add(
         DecisionLogEntry(
             actor="human:api",
