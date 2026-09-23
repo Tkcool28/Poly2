@@ -1,20 +1,29 @@
-"""FastAPI application — Chunk 1: health, status, config, empty read endpoints."""
+"""FastAPI application — health, status, config, and dashboard read endpoints."""
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.api.routes import router as api_router
 from polycopy.config import Settings, get_settings
 from polycopy.db import dispose_engine, get_db
 from polycopy.logging_config import configure_logging, get_logger
-from polycopy.models import Signal, Wallet
+from polycopy.models import (
+    Market,
+    PaperOrder,
+    Position,
+    ServiceHeartbeat,
+    Signal,
+    Wallet,
+    WalletScore,
+)
 
 logger = get_logger("polycopy.api")
 
@@ -79,6 +88,27 @@ async def health_deps(
     except Exception as exc:  # noqa: BLE001
         checks["redis"] = f"error: {type(exc).__name__}"
 
+    try:
+        heartbeat = (
+            await db.execute(
+                select(ServiceHeartbeat)
+                .where(ServiceHeartbeat.service == "bot")
+                .order_by(ServiceHeartbeat.seen_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if heartbeat is None:
+            checks["bot"] = "missing"
+        else:
+            seen_at = heartbeat.seen_at
+            if seen_at.tzinfo is None:
+                seen_at = seen_at.replace(tzinfo=UTC)
+            age_seconds = (datetime.now(UTC) - seen_at).total_seconds()
+            stale_after = max(60.0, settings.ingestion_poll_interval_seconds * 3)
+            checks["bot"] = "ok" if age_seconds <= stale_after else "stale"
+    except Exception as exc:  # noqa: BLE001
+        checks["bot"] = f"error: {type(exc).__name__}"
+
     ok = all(v == "ok" for v in checks.values())
     return {"status": "ok" if ok else "degraded", "checks": checks}
 
@@ -106,11 +136,43 @@ async def config_view(settings: Settings = Depends(get_settings)) -> dict:
     return settings.public_dict()
 
 
+def _iso(dt) -> str | None:
+    return dt.isoformat() if dt else None
+
+
+async def _latest_scores(db: AsyncSession, wallet_ids: list[int]) -> dict[int, WalletScore]:
+    """Latest score per requested wallet, without truncating score history."""
+    if not wallet_ids:
+        return {}
+    ranked = (
+        select(
+            WalletScore.id.label("score_id"),
+            func.row_number()
+            .over(
+                partition_by=WalletScore.wallet_id,
+                order_by=(WalletScore.computed_at.desc(), WalletScore.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(WalletScore.wallet_id.in_(wallet_ids))
+        .subquery()
+    )
+    rows = (
+        await db.execute(
+            select(WalletScore)
+            .join(ranked, WalletScore.id == ranked.c.score_id)
+            .where(ranked.c.rn == 1)
+        )
+    ).scalars().all()
+    return {score.wallet_id: score for score in rows}
+
+
 @app.get("/wallets")
 async def list_wallets(db: AsyncSession = Depends(get_db)) -> dict:
-    """All tracked wallets. Empty until Chunk 2 ingestion lands."""
+    """All tracked wallets with their latest score (dashboard Wallets tab)."""
     result = await db.execute(select(Wallet).order_by(Wallet.id).limit(500))
     wallets = result.scalars().all()
+    scores = await _latest_scores(db, [w.id for w in wallets])
     return {
         "items": [
             {
@@ -120,6 +182,11 @@ async def list_wallets(db: AsyncSession = Depends(get_db)) -> dict:
                 "approval_state": w.approval_state,
                 "is_approved": w.is_approved,  # derived from approval_state
                 "is_sample": w.is_sample,
+                "approved_at": _iso(w.approved_at),
+                "created_at": _iso(w.created_at),
+                "composite_score": (
+                    scores[w.id].composite_score if w.id in scores else None
+                ),
             }
             for w in wallets
         ],
@@ -129,23 +196,137 @@ async def list_wallets(db: AsyncSession = Depends(get_db)) -> dict:
 
 @app.get("/signals")
 async def list_signals(db: AsyncSession = Depends(get_db)) -> dict:
-    """All signals. Empty until the scoring engine lands."""
-    result = await db.execute(select(Signal).order_by(Signal.id.desc()).limit(500))
-    signals = result.scalars().all()
-    return {
-        "items": [
+    """Recent signals with market/wallet context and the copy result.
+
+    One row per signal, newest first — the dashboard Activity tab renders
+    this directly, so each item carries everything needed to explain in
+    plain language what the followed wallet did and what the bot did
+    about it (filled / partial / missed + why).
+    """
+    rows = (
+        await db.execute(
+            select(Signal, Market, Wallet)
+            .join(Market, Signal.market_id == Market.id)
+            .join(Wallet, Signal.wallet_id == Wallet.id)
+            .order_by(Signal.id.desc())
+            .limit(200)
+        )
+    ).all()
+    orders = (
+        await db.execute(
+            select(PaperOrder)
+            .where(PaperOrder.signal_id.in_([s.id for s, _, _ in rows]))
+            .limit(500)
+        )
+    ).scalars().all() if rows else []
+    order_by_signal = {o.signal_id: o for o in orders}
+    items = []
+    for s, market, wallet in rows:
+        order = order_by_signal.get(s.id)
+        items.append(
             {
                 "id": s.id,
                 "wallet_id": s.wallet_id,
+                "wallet_address": wallet.address,
+                "wallet_label": wallet.label,
                 "market_id": s.market_id,
+                "market_question": market.question,
                 "side": s.side,
                 "outcome": s.outcome,
-                "edge": s.edge,
-                "confidence": s.confidence,
+                "source_price": float(s.source_price),
                 "status": s.status,
-                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "t0_traded_at": _iso(s.t0_traded_at),
+                "t1_detected_at": _iso(s.t1_detected_at),
+                "created_at": _iso(s.created_at),
+                "paper_order": (
+                    {
+                        "status": order.status,
+                        "miss_reason": order.miss_reason,
+                        "fill_price": (
+                            float(order.fill_price)
+                            if order.fill_price is not None else None
+                        ),
+                        "filled_size": (
+                            float(order.filled_size)
+                            if order.filled_size is not None else None
+                        ),
+                        "fee": float(order.fee) if order.fee is not None else None,
+                        "t2_decided_at": _iso(order.t2_decided_at),
+                    }
+                    if order else None
+                ),
             }
-            for s in signals
-        ],
-        "count": len(signals),
+        )
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/positions")
+async def list_positions(db: AsyncSession = Depends(get_db)) -> dict:
+    """Paper portfolio: open and settled positions with context + totals.
+
+    Rows with quantity > 0 are open; rows with settled_at set were settled
+    at market resolution (winner $1 / loser $0). Totals let the dashboard
+    headline realized practice P&L without client-side math.
+    """
+    rows = (
+        await db.execute(
+            select(Position, Market, Wallet)
+            .join(Market, Position.market_id == Market.id)
+            .join(Wallet, Position.wallet_id == Wallet.id)
+            .order_by(Position.id.desc())
+            .limit(500)
+        )
+    ).all()
+    items = [
+        {
+            "id": p.id,
+            "wallet_id": p.wallet_id,
+            "wallet_address": w.address,
+            "wallet_label": w.label,
+            "market_id": p.market_id,
+            "market_question": m.question,
+            "market_closed": m.closed,
+            "outcome": p.outcome,
+            "quantity": float(p.quantity),
+            "avg_price": float(p.avg_price),
+            "realized_pnl": float(p.realized_pnl),
+            "settled_at": _iso(p.settled_at),
+            "updated_at": _iso(p.updated_at),
+        }
+        for p, m, w in rows
+    ]
+    open_condition = (Position.quantity > 0) & Position.settled_at.is_(None)
+    totals_row = (
+        await db.execute(
+            select(
+                func.coalesce(
+                    func.sum(case((open_condition, 1), else_=0)), 0
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (open_condition, Position.quantity * Position.avg_price),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(func.sum(Position.realized_pnl), 0),
+                func.coalesce(
+                    func.sum(case((Position.settled_at.is_not(None), 1), else_=0)), 0
+                ),
+            )
+        )
+    ).one()
+    return {
+        "items": items,
+        "count": len(items),
+        "totals": {
+            # Totals intentionally aggregate the full position table; the
+            # display list remains bounded to the newest 500 rows.
+            "open_count": int(totals_row[0]),
+            "open_cost_usd": float(totals_row[1]),
+            "realized_pnl_usd": float(totals_row[2]),
+            "settled_count": int(totals_row[3]),
+        },
     }

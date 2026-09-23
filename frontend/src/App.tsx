@@ -1,7 +1,6 @@
 import { Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import Approvals from "./pages/Approvals";
-import Health from "./pages/Health";
 import Overview from "./pages/Overview";
 import Portfolio from "./pages/Portfolio";
 import Signals from "./pages/Signals";
@@ -16,7 +15,6 @@ export default function App() {
         <Route path="/signals" element={<Signals />} />
         <Route path="/portfolio" element={<Portfolio />} />
         <Route path="/approvals" element={<Approvals />} />
-        <Route path="/health" element={<Health />} />
       </Route>
     </Routes>
   );
