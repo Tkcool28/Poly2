@@ -5,9 +5,6 @@ The approval state machine has ONE source of truth:
 transitions (pending_review → approved | rejected; approved → disabled).
 Every transition closes its queue entry and writes a DecisionLogEntry
 with actor ``human:api``.
-
-``POST /wallets`` is the manual candidate-intake front door: the only way
-a wallet enters the system in Chunk 2 (no automated discovery).
 """
 
 from __future__ import annotations
@@ -75,6 +72,35 @@ async def _latest_score(db: AsyncSession, wallet_id: int) -> WalletScore | None:
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+async def _latest_scores(
+    db: AsyncSession, wallet_ids: list[int]
+) -> dict[int, WalletScore]:
+    """Latest score per wallet in one bounded query."""
+    if not wallet_ids:
+        return {}
+    ranked = (
+        select(
+            WalletScore.id.label("score_id"),
+            func.row_number()
+            .over(
+                partition_by=WalletScore.wallet_id,
+                order_by=(WalletScore.computed_at.desc(), WalletScore.id.desc()),
+            )
+            .label("rn"),
+        )
+        .where(WalletScore.wallet_id.in_(wallet_ids))
+        .subquery()
+    )
+    scores = (
+        await db.execute(
+            select(WalletScore)
+            .join(ranked, WalletScore.id == ranked.c.score_id)
+            .where(ranked.c.rn == 1)
+        )
+    ).scalars().all()
+    return {score.wallet_id: score for score in scores}
 
 
 @router.post("/wallets")
@@ -153,9 +179,10 @@ async def list_approval_queue(db: AsyncSession = Depends(get_db)) -> dict:
             .limit(200)
         )
     ).all()
+    scores = await _latest_scores(db, [wallet.id for _, wallet in rows])
     items = []
     for entry, wallet in rows:
-        score = await _latest_score(db, wallet.id)
+        score = scores.get(wallet.id)
         items.append(
             {
                 "entry_id": entry.id,
