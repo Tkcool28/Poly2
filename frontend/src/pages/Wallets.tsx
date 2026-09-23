@@ -43,7 +43,7 @@ export default function Wallets() {
       setLabel("");
       setAddMsg({
         tone: "good",
-        text: `Added ${shortAddr(w.address)}. It'll be scored, then you decide whether to follow it in the Review tab.`,
+        text: `Added ${shortAddr(w.address)}. Next: give the bot a poll cycle or two to pull their recent trades, then tap “Check for new candidates” in the Review tab to score them — you decide whether to follow.`,
       });
       refresh();
     } catch (e) {
@@ -115,7 +115,7 @@ export default function Wallets() {
           disabled={adding}
           className="mt-3 min-h-[48px] w-full rounded-xl bg-blue-700 font-semibold text-white active:bg-blue-600 disabled:opacity-40"
         >
-          {adding ? "Adding…" : "Add wallet"}
+          {adding ? "Adding…” : "Add wallet"}
         </button>
         {addMsg && (
           <div

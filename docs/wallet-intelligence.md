@@ -33,6 +33,15 @@ discovered wallet.
 - **Active within the last 14 days**
 - **Positive realized P&L** after fees
 
+**Scoring input caveat (review correction, 2026-09-21):** gates and scores
+are computed from *ingested* trades only. Ingestion is a live tail —
+most-recent `POLYCOPY_INGESTION_BATCH_SIZE` (500) per wallet per cycle,
+not a full-history backfill. A deep-history wallet can fail the trade
+count or settled-market gates spuriously on first scoring (`insufficient_history`
+is the safe, non-terminal verdict — the wallet is rescored automatically
+as the tail deepens). Never describe a score as covering the wallet's
+complete trading history unless a backfill feature has shipped.
+
 Gate failures split into two kinds (review correction, 2026-09-20):
 
 - **Maturity gates** (settled markets, trade count, account age): failing

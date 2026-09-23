@@ -17,6 +17,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 os.environ.setdefault("POLYCOPY_ENVIRONMENT", "test")
@@ -107,3 +108,62 @@ async def test_malformed_addresses_rejected(client, bad):
 async def test_label_length_capped(client):
     resp = client.post("/wallets", json={"address": VALID, "label": "x" * 121})
     assert resp.status_code == 422
+
+
+async def test_mixed_case_existing_row_is_detected(client, session):
+    """REVIEW REGRESSION: rows seeded before lowercase normalization hold
+    mixed-case addresses; the DB unique constraint is case-sensitive, so
+    detection must be case-insensitive."""
+    session.add(
+        Wallet(address=VALID.upper().replace("0X", "0x"), approval_state="discovered")
+    )
+    await session.commit()
+    resp = client.post("/wallets", json={"address": VALID})
+    assert resp.status_code == 409
+    assert "already tracked" in resp.json()["detail"]
+    assert (
+        len((await session.execute(select(Wallet))).scalars().all()) == 1
+    )
+
+
+async def test_concurrent_duplicate_insert_returns_clean_409(
+    client, session, monkeypatch
+):
+    """REVIEW REGRESSION: two requests pass the existence check at the
+    same time; the loser's flush hits the unique constraint. That must
+    roll back and surface as the same clean 409 — never a 500.
+
+    Simulated by forcing the pre-insert check to miss while the row
+    already exists, and forcing flush to raise IntegrityError.
+    """
+    session.add(Wallet(address=VALID, approval_state="discovered"))
+    await session.commit()
+
+    real_execute = session.execute
+
+    class _MissedCheck:
+        def scalar_one_or_none(self):
+            return None
+
+    calls = {"seen": 0}
+
+    async def racing_execute(stmt, *args, **kwargs):
+        # Only the FIRST lower(address) lookup misses (the race window);
+        # the post-rollback re-check runs for real and finds the row.
+        if calls["seen"] == 0 and "lower" in str(stmt).lower():
+            calls["seen"] += 1
+            return _MissedCheck()
+        return await real_execute(stmt, *args, **kwargs)
+
+    async def losing_flush():
+        raise IntegrityError("INSERT INTO wallets", {}, Exception("unique"))
+
+    monkeypatch.setattr(session, "execute", racing_execute)
+    monkeypatch.setattr(session, "flush", losing_flush)
+
+    resp = client.post("/wallets", json={"address": VALID})
+    assert resp.status_code == 409
+    assert "already tracked" in resp.json()["detail"]
+    assert (
+        len((await session.execute(select(Wallet))).scalars().all()) == 1
+    )

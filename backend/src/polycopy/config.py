@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     max_copy_price: float = 0.90
 
     # --- Ingestion bounds (Chunk 2; defined now so nobody forgets) -------
+    # Most-recent-N per wallet per cycle: a live TAIL, not a full history
+    # backfill. Scores computed from ingested trades may undercount
+    # deep-history wallets (e.g. maturity gates in docs/wallet-intelligence).
     ingestion_batch_size: int = 500
     ingestion_max_concurrent_requests: int = 4
     ingestion_poll_interval_seconds: float = 15.0
