@@ -136,6 +136,31 @@ async def test_refresh_is_idempotent(session):
     assert (await session.scalar(select(func.count(Settlement.id)))) == 1
 
 
+async def test_refresh_settles_historical_closed_market_without_settlement_row(session):
+    """REVIEW REGRESSION: a market ingested with closed=True from Gamma
+    metadata (historical market, traded before we tracked it) has no
+    Settlement row. It must REMAIN eligible for settlement refresh —
+    filtering on Market.closed would orphan its paper positions forever.
+    """
+    await _add_market(session, "0xhist", closed=True)
+    client = _client_with({"0xhist": _gamma()})
+    stats = await refresh_settlements(session, client)
+    assert stats["settled"] == 1
+    settlement = (await session.execute(select(Settlement))).scalar_one()
+    assert settlement.winning_outcome == "Up"
+
+
+async def test_refresh_closed_market_ambiguous_winner_is_skipped(session):
+    """closed=True locally but Gamma's winner data is ambiguous → skip,
+    never guess. (Covers the newly-eligible closed market path.)"""
+    await _add_market(session, "0xambig", closed=True)
+    client = _client_with({"0xambig": _gamma(prices='["1", "1"]')})
+    stats = await refresh_settlements(session, client)
+    assert stats["settled"] == 0
+    assert stats["skipped_ambiguous"] == 1
+    assert (await session.scalar(select(func.count(Settlement.id)))) == 0
+
+
 async def test_gamma_error_does_not_stop_other_markets(session):
     await _add_market(session, "0xbad")
     await _add_market(session, "0xgood")

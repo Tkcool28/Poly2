@@ -13,8 +13,14 @@ strict (anything ambiguous → market skipped, logged, NOT settled) so a
 wrong guess can never write a wrong settlement. Verification via the
 probe script is tracked in docs/source-identity-contract.md.
 
+Eligibility is "tracked market WITHOUT a Settlement row" — NOT "market
+not yet flagged closed". A market ingested with ``closed=True`` from
+Gamma metadata (historical market traded before we started tracking it)
+must remain eligible, otherwise its paper positions would never settle
+(review correction, 2026-09-21).
+
 Fail-closed rules:
-* Not closed → skip.
+* Not closed (per Gamma at check time) → skip.
 * Closed but no unambiguous winner (no price exactly "1", or two "1"s)
   → skip and log. Never invent a result.
 * One Settlement per market, enforced by the uq_settlements_market
@@ -71,7 +77,14 @@ async def refresh_settlements(
     session: AsyncSession,
     client: PolymarketClient,
 ) -> dict[str, int]:
-    """Check tracked open markets for resolution; record new settlements.
+    """Check tracked markets WITHOUT a Settlement row for resolution.
+
+    Eligibility is "no Settlement row" — NOT "not yet flagged closed".
+    A market ingested with ``closed=True`` from Gamma metadata (a
+    historical market traded before we started tracking it) would
+    otherwise be permanently excluded and its paper positions would
+    never settle. Closed-but-ambiguous Gamma data is still skipped by
+    ``detect_winning_outcome``, never settled on a guess.
 
     Markets are checked SEQUENTIALLY (client caps concurrency anyway) and
     each market's settlement is its own transaction. Returns counters.
@@ -80,10 +93,7 @@ async def refresh_settlements(
     markets = (
         (
             await session.execute(
-                select(Market).where(
-                    Market.closed.is_(False),
-                    Market.id.not_in(settled_market_ids),
-                )
+                select(Market).where(Market.id.not_in(settled_market_ids))
             )
         )
         .scalars()

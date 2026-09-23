@@ -9,11 +9,51 @@ import {
   useApi,
 } from "../lib/api";
 
+const ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
 /** Wallets: everyone the bot tracks, their state, and their score. */
 export default function Wallets() {
   const { data, error, refresh } = useApi(api.wallets);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [address, setAddress] = useState("");
+  const [label, setLabel] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [addMsg, setAddMsg] = useState<{
+    tone: "good" | "bad";
+    text: string;
+  } | null>(null);
   const items = data?.items ?? [];
+
+  async function add(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = address.trim();
+    if (!ADDRESS_RE.test(trimmed)) {
+      setAddMsg({
+        tone: "bad",
+        text: "That doesn't look like a wallet address — it should be 0x followed by 40 letters/numbers.",
+      });
+      return;
+    }
+    setAdding(true);
+    setAddMsg(null);
+    setActionError(null);
+    try {
+      const w = await api.addWallet(trimmed, label.trim() || undefined);
+      setAddress("");
+      setLabel("");
+      setAddMsg({
+        tone: "good",
+        text: `Added ${shortAddr(w.address)}. Next: give the bot a poll cycle or two to pull their recent trades, then tap “Check for new candidates” in the Review tab to score them — you decide whether to follow.`,
+      });
+      refresh();
+    } catch (e) {
+      const status = String(e).includes("409")
+        ? "That wallet is already being tracked."
+        : `Couldn't add it. (${e})`;
+      setAddMsg({ tone: "bad", text: status });
+    }
+    setAdding(false);
+  }
 
   async function disable(id: number, address: string) {
     if (
@@ -43,10 +83,56 @@ export default function Wallets() {
           {actionError}
         </div>
       )}
+
+      {/* Manual intake — Chunk 2 has no automated discovery */}
+      <form
+        onSubmit={add}
+        className="mb-5 rounded-xl bg-gray-900 p-4"
+      >
+        <div className="font-medium">Add a wallet to track</div>
+        <p className="mt-1 text-xs text-gray-500">
+          Paste a Polymarket wallet address (starts with 0x). The bot starts
+          watching it for scoring — nothing gets copied until you approve it.
+        </p>
+        <input
+          value={address}
+          onChange={(e) => setAddress(e.target.value)}
+          placeholder="0x…"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          className="mt-3 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-3 text-sm outline-none focus:border-gray-500"
+        />
+        <input
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="Label (optional, e.g. “Sharp bettor”)"
+          maxLength={120}
+          className="mt-2 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-3 text-sm outline-none focus:border-gray-500"
+        />
+        <button
+          type="submit"
+          disabled={adding}
+          className="mt-3 min-h-[48px] w-full rounded-xl bg-blue-700 font-semibold text-white active:bg-blue-600 disabled:opacity-40"
+        >
+          {adding ? "Adding…" : "Add wallet"}
+        </button>
+        {addMsg && (
+          <div
+            className={`mt-3 rounded-lg p-3 text-sm ${
+              addMsg.tone === "good"
+                ? "bg-green-900/50 text-green-200"
+                : "bg-red-900/50 text-red-200"
+            }`}
+          >
+            {addMsg.text}
+          </div>
+        )}
+      </form>
       {items.length === 0 ? (
         <EmptyState
           title="No wallets yet"
-          message="Candidate wallets are added by the operator (you) for now. Once scored, promising ones appear in the Review tab."
+          message="Add a wallet above — the bot will start tracking it for scoring, and promising candidates land in the Review tab."
         />
       ) : (
         <div className="space-y-3">

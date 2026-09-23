@@ -12,7 +12,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.db import get_db
@@ -25,6 +27,15 @@ from polycopy.models import (
 from polycopy.scoring.service import score_all_wallets
 
 router = APIRouter()
+
+_WALLET_ADDRESS_PATTERN = r"^0x[0-9a-fA-F]{40}$"
+
+
+class WalletCreateIn(BaseModel):
+    """Manual candidate intake — Chunk 2 has no automated discovery."""
+
+    address: str = Field(pattern=_WALLET_ADDRESS_PATTERN)
+    label: str | None = Field(default=None, max_length=120)
 
 _ALLOWED_TRANSITIONS = {
     "approve": ("pending_review", "approved"),
@@ -91,6 +102,71 @@ async def _latest_scores(
         )
     ).scalars().all()
     return {score.wallet_id: score for score in scores}
+
+
+@router.post("/wallets")
+async def add_wallet(body: WalletCreateIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """Manual candidate intake: register a wallet address to track.
+
+    Discovery stays human-driven in Chunk 2 — this endpoint is the ONLY
+    way a wallet enters the system. New wallets land in ``discovered``:
+    ingestion starts tailing them for scoring, but nothing becomes
+    copyable until a human approves them through the review queue.
+    Addresses are normalized to lowercase; duplicates are rejected.
+    Existence checks are CASE-INSENSITIVE (``func.lower``) because rows
+    seeded before normalization may hold mixed-case addresses, and the
+    ``wallets.address`` unique constraint is case-sensitive in Postgres.
+    A concurrent duplicate insert that slips past the check is caught by
+    the unique constraint and converted to a clean 409, never a 500.
+    """
+    address = body.address.lower()
+    existing = (
+        await db.execute(
+            select(Wallet).where(func.lower(Wallet.address) == address)
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"wallet {address} is already tracked "
+            f"(state: {existing.approval_state})",
+        )
+
+    wallet = Wallet(address=address, label=body.label, approval_state="discovered")
+    db.add(wallet)
+    try:
+        await db.flush()
+    except IntegrityError:
+        # Lost a duplicate race: another request inserted the same address
+        # between our check and our flush. Roll back and re-check so the
+        # caller gets the same clean 409 as the sequential path.
+        await db.rollback()
+        winner = (
+            await db.execute(
+                select(Wallet).where(func.lower(Wallet.address) == address)
+            )
+        ).scalar_one_or_none()
+        if winner is None:
+            raise  # a genuinely different constraint violation — not ours
+        raise HTTPException(
+            status_code=409,
+            detail=f"wallet {address} is already tracked "
+            f"(state: {winner.approval_state})",
+        )
+    db.add(
+        DecisionLogEntry(
+            actor="human:api",
+            action="wallet_added",
+            context={"wallet": address, "label": body.label},
+        )
+    )
+    await db.commit()
+    return {
+        "id": wallet.id,
+        "address": wallet.address,
+        "label": wallet.label,
+        "approval_state": wallet.approval_state,
+    }
 
 
 @router.get("/wallets/{wallet_id}/score")
