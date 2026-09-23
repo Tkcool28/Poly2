@@ -13,9 +13,43 @@ Polycopy with a PostgreSQL + Redis + event-driven architecture.
 
 ```bash
 cp .env.example .env
+# Set POLYCOPY_POSTGRES_USER, POLYCOPY_POSTGRES_PASSWORD, and
+# POLYCOPY_DATABASE_URL in .env (using the same database credentials).
 docker compose up --build
-# Dashboard: http://localhost/
-# API:       http://localhost/api/health
+# Dashboard: http://127.0.0.1:8790/
+# API:       http://127.0.0.1:8790/api/health
+```
+
+## Production ingress
+
+Compose publishes nginx only on `${POLYCOPY_BIND_ADDRESS:-127.0.0.1}:${POLYCOPY_HTTP_PORT:-8790}:80`.
+On the VPS, host Caddy owns ports 80/443, terminates HTTPS and authentication,
+and proxies to `http://127.0.0.1:8790` by default. Keep the bind address on
+loopback; set `POLYCOPY_HTTP_PORT` in `.env` if that port is occupied. Caddy
+must forward the original `/api/` path unchanged. Existing nginx routing strips
+the `/api/` prefix and forwards to the backend's bare FastAPI routes.
+
+Set `POLYCOPY_POSTGRES_USER` and `POLYCOPY_POSTGRES_PASSWORD` in `.env`; the
+database name is `POLYCOPY_POSTGRES_DB` (default `polycopy`). Set
+`POLYCOPY_DATABASE_URL` to
+`postgresql+asyncpg://<URL-encoded user>:<URL-encoded password>@postgres:5432/<database>`
+with the same values. URL-encode special characters in the username/password.
+The example intentionally contains no working database credentials. For an
+already initialized Postgres volume, changing these initialization variables
+does not change existing database roles or passwords; provision matching
+credentials before switching the application URL.
+
+After `infra/deploy.sh` reports success, validate through the authenticated
+host Caddy endpoint (with the appropriate credentials):
+
+```text
+/api/health
+/api/health/deps
+/api/system/status
+/api/wallets
+/api/signals
+/api/positions
+/api/approval-queue
 ```
 
 ## Stack
