@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up Poly2 PostgreSQL
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/poly2
+ExecStart=/opt/poly2/infra/backup-postgres.sh
