@@ -3,7 +3,6 @@
 import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -16,7 +15,7 @@ def test_compose_ingress_defaults_to_loopback_and_is_configurable():
     assert '"${POLYCOPY_BIND_ADDRESS:-127.0.0.1}:${POLYCOPY_HTTP_PORT:-8790}:80"' in compose
     nginx = compose.split("\n  nginx:\n", 1)[1].split("\nvolumes:", 1)[0]
     assert '"80:80"' not in nginx
-    assert not re.search(r'^\s+-\s+["\']?(?:0\.0\.0\.0:)?80:80', nginx, re.M)
+    assert not re.search(r'^\s+-\s+["\']?(?:0\.0\.0\.0:)?80:80', nginx, re.MULTILINE)
 
 
 def test_postgres_credentials_and_healthcheck_follow_environment():
@@ -41,7 +40,7 @@ def test_example_credentials_and_safety_defaults():
         "POLYCOPY_ALLOW_LIVE_TRADING=false",
         "POLYCOPY_ORDER_KILL_SWITCH=true",
     ):
-        assert re.search(rf"^{re.escape(line)}$", example, re.M)
+        assert re.search(rf"^{re.escape(line)}$", example, re.MULTILINE)
 
 
 def test_api_ingress_and_deploy_health_url():
