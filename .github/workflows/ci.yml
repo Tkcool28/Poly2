@@ -52,5 +52,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate compose file
+        env:
+          POLYCOPY_POSTGRES_USER: ci_example_user
+          POLYCOPY_POSTGRES_PASSWORD: ci_example_password
+          POLYCOPY_POSTGRES_DB: ci_example_db
         run: docker compose config -q
         
