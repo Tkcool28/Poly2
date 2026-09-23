@@ -223,7 +223,7 @@ async def ingest_wallet_trades(
                     )
                 )
                 await session.flush()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - deliberate row quarantine boundary
             quarantined += 1
             _record_quarantine(
                 session,
