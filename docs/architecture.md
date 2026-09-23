@@ -28,8 +28,10 @@ Runtime ownership (PR #7 hardening — the concrete autonomous path):
 | Human approval | **API**: `POST /wallets/{id}/{action}` |
 
 Candidate-wallet DISCOVERY is intentionally still manual in Chunk 2:
-wallets are added explicitly, then scored, reviewed, and approved by a
-human. The full loop `ingest → settle → score → pending review → human
+wallets enter via `POST /wallets` (dashboard "Add wallet" form on the
+Wallets tab), then are scored, reviewed, and approved by a human. New
+wallets land in `discovered` — ingestion tails them for scoring, but
+nothing becomes copyable before human approval. The full loop `ingest → settle → score → pending review → human
 approval → tail → paper execute → paper settle` has a named owner at
 every step.
 

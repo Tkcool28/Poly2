@@ -1,9 +1,10 @@
 # Dashboard (PR-F)
 
 The dashboard is the operator's phone-first window into the bot. It is
-read-mostly: the only actions it can trigger are the human approval-gate
-transitions (approve / reject / disable) and an on-demand scoring run.
-It cannot place trades, change sizing, or touch the kill switch.
+read-mostly: the only actions it can trigger are wallet intake (add a
+candidate), the human approval-gate transitions (approve / reject /
+disable), and an on-demand scoring run. It cannot place trades, change
+sizing, or touch the kill switch.
 
 ## Design rules (do not regress)
 
@@ -28,8 +29,8 @@ It cannot place trades, change sizing, or touch the kill switch.
 | Home | `/positions`, `/signals`, `/wallets`, `/approval-queue`, `/health/deps` | Headline = realized practice P&L from `positions.totals` |
 | Activity | `/signals` | Each item embeds market question, wallet, and the paper-order result |
 | Portfolio | `/positions` | Open = `quantity > 0 && settled_at == null`; totals computed server-side |
-| Wallets | `/wallets` | Includes latest composite score per wallet |
-| Review | `/approval-queue`, POST `/wallets/{id}/{action}`, POST `/scoring/run` | The only write path in the UI; rescoring existing candidates, not wallet discovery |
+| Wallets | `/wallets` (GET + POST), POST `/wallets/{id}/disable` | Includes latest composite score; POST is manual candidate intake — the only way a wallet enters the system |
+| Review | `/approval-queue`, POST `/wallets/{id}/{action}`, POST `/scoring/run` | The human approval gate; rescoring existing candidates, not wallet discovery |
 
 Backend payloads intentionally carry display context (market question,
 wallet address/label) so the frontend never fans out into N+1 requests
