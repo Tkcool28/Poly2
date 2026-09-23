@@ -5,6 +5,9 @@ The approval state machine has ONE source of truth:
 transitions (pending_review → approved | rejected; approved → disabled).
 Every transition closes its queue entry and writes a DecisionLogEntry
 with actor ``human:api``.
+
+``POST /wallets`` is the manual candidate-intake front door: the only way
+a wallet enters the system in Chunk 2 (no automated discovery).
 """
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +29,15 @@ from polycopy.models import (
 from polycopy.scoring.service import score_all_wallets
 
 router = APIRouter()
+
+_WALLET_ADDRESS_PATTERN = r"^0x[0-9a-fA-F]{40}$"
+
+
+class WalletCreateIn(BaseModel):
+    """Manual candidate intake — Chunk 2 has no automated discovery."""
+
+    address: str = Field(pattern=_WALLET_ADDRESS_PATTERN)
+    label: str | None = Field(default=None, max_length=120)
 
 _ALLOWED_TRANSITIONS = {
     "approve": ("pending_review", "approved"),
@@ -64,33 +77,44 @@ async def _latest_score(db: AsyncSession, wallet_id: int) -> WalletScore | None:
     ).scalar_one_or_none()
 
 
-async def _latest_scores(
-    db: AsyncSession, wallet_ids: list[int]
-) -> dict[int, WalletScore]:
-    """Latest score per wallet in one bounded query."""
-    if not wallet_ids:
-        return {}
-    ranked = (
-        select(
-            WalletScore.id.label("score_id"),
-            func.row_number()
-            .over(
-                partition_by=WalletScore.wallet_id,
-                order_by=(WalletScore.computed_at.desc(), WalletScore.id.desc()),
-            )
-            .label("rn"),
+@router.post("/wallets")
+async def add_wallet(body: WalletCreateIn, db: AsyncSession = Depends(get_db)) -> dict:
+    """Manual candidate intake: register a wallet address to track.
+
+    Discovery stays human-driven in Chunk 2 — this endpoint is the ONLY
+    way a wallet enters the system. New wallets land in ``discovered``:
+    ingestion starts tailing them for scoring, but nothing becomes
+    copyable until a human approves them through the review queue.
+    Addresses are normalized to lowercase; duplicates are rejected.
+    """
+    address = body.address.lower()
+    existing = (
+        await db.execute(select(Wallet).where(Wallet.address == address))
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"wallet {address} is already tracked "
+            f"(state: {existing.approval_state})",
         )
-        .where(WalletScore.wallet_id.in_(wallet_ids))
-        .subquery()
+
+    wallet = Wallet(address=address, label=body.label, approval_state="discovered")
+    db.add(wallet)
+    await db.flush()
+    db.add(
+        DecisionLogEntry(
+            actor="human:api",
+            action="wallet_added",
+            context={"wallet": address, "label": body.label},
+        )
     )
-    scores = (
-        await db.execute(
-            select(WalletScore)
-            .join(ranked, WalletScore.id == ranked.c.score_id)
-            .where(ranked.c.rn == 1)
-        )
-    ).scalars().all()
-    return {score.wallet_id: score for score in scores}
+    await db.commit()
+    return {
+        "id": wallet.id,
+        "address": wallet.address,
+        "label": wallet.label,
+        "approval_state": wallet.approval_state,
+    }
 
 
 @router.get("/wallets/{wallet_id}/score")
@@ -129,10 +153,9 @@ async def list_approval_queue(db: AsyncSession = Depends(get_db)) -> dict:
             .limit(200)
         )
     ).all()
-    scores = await _latest_scores(db, [wallet.id for _, wallet in rows])
     items = []
     for entry, wallet in rows:
-        score = scores.get(wallet.id)
+        score = await _latest_score(db, wallet.id)
         items.append(
             {
                 "entry_id": entry.id,
