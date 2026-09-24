@@ -34,17 +34,29 @@ discovered wallet.
 - **Positive realized P&L** after fees
 
 **Scoring input caveat:** gates and scores use locally ingested trades only.
-Recurring ingestion remains a live tail of the most recent
-`POLYCOPY_INGESTION_BATCH_SIZE` (500) trades per wallet per cycle. Before an
-operator scoring pass, discovered candidates use a separate bounded historical
-bootstrap (default 10 pages × 100 trades, at most 1,000 trades and 50 logical
-API requests, including bounded settlement lookups). It pages newest-first
-with Data API `offset` and a fixed `end` timestamp, then reconciles settlement
-through the existing closed Gamma market validation. It stops when the 30
+Recurring ingestion requests the most recent `POLYCOPY_INGESTION_BATCH_SIZE`
+(500) trades per wallet per cycle. Approved wallets also persist a continuity
+anchor: if the latest slice no longer contains the previously observed trade,
+at most `POLYCOPY_CATCH_UP_PAGES_PER_CYCLE` (3) older pages are processed per
+cycle until that canonical trade reappears. The offset, timestamp window, and
+incomplete state survive restarts in the decision log. A lost upstream window
+remains visibly incomplete; a full newest page never proves continuity.
+
+Before a scoring pass, discovered candidates use a separate historical
+bootstrap (100 trades per page; 25 pages per run; cumulative caps of 200 pages,
+20,000 fetched rows, 240 logical requests, and 20 Gamma market checks). It
+pages newest-first using Data API `offset`, `start=1`, and a fixed `end` timestamp.
+At the API's 10,000-offset ceiling it rolls to an older inclusive timestamp
+window and resets the offset; canonical trade identity deduplicates boundary
+overlap. If all rows at the boundary share one second, the scan fails closed
+when an older window cannot be established. Settlement reconciliation uses
+existing closed Gamma market validation and stops requesting settlements once
+the 15-market maturity gate is met. It stops when the 30
 trade, 15 settled-market, and 30-day age gates can be evaluated, the upstream
-history ends, or a configured bound is reached. `insufficient_history` stays
-non-terminal. The `/wallets/{id}/bootstrap` endpoint exposes its termination
-reason and evidence. This bounded pass does not claim complete wallet history.
+history ends, or a cumulative bound is reached. A per-run page cap records
+`in_progress` and delays scoring until a subsequent pass finishes. The
+`/wallets/{id}/bootstrap` endpoint exposes termination and evidence. This
+bounded pass does not claim complete wallet history.
 
 Gate failures split into two kinds (review correction, 2026-09-20):
 

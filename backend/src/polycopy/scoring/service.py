@@ -267,7 +267,7 @@ async def score_all_wallets(
             from polycopy.ingestion.service import bootstrap_wallet_history
 
             bootstrap = await bootstrap_wallet_history(session, client, wallet, now=now)
-            if bootstrap.get("termination_reason") == "upstream_error":
+            if bootstrap.get("termination_reason") in ("upstream_error", "in_progress"):
                 # Do not persist a score from a snapshot whose requested
                 # bootstrap page failed; the next operator run can resume.
                 results[wallet.address] = "insufficient_history"

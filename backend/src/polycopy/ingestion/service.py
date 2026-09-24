@@ -179,8 +179,8 @@ async def bootstrap_wallet_history(
     if state.get("termination_reason") == "history_exhausted":
         return state
 
-    max_trades = min(max(1, settings.bootstrap_max_trades), 10000)
-    page_size = min(max(1, settings.bootstrap_page_size), max_trades, 10000)
+    max_trades = max(1, settings.bootstrap_max_trades)
+    page_size = min(max(1, settings.bootstrap_page_size), max_trades, 500)
     max_pages = max(1, settings.bootstrap_max_pages)
     max_requests = max(1, settings.bootstrap_max_requests)
     if state.get("termination_reason") == "configured_limit_reached" and (
@@ -191,6 +191,7 @@ async def bootstrap_wallet_history(
         return state
     end_ts = int(state.get("end_timestamp") or now.timestamp())
     offset = int(state.get("next_offset", 0))
+    window_oldest = state.get("window_oldest")
     pages = int(state.get("pages_requested", 0))
     rows_fetched = int(state.get("rows_fetched", 0))
     requests = int(state.get("requests_used", 0))
@@ -202,6 +203,7 @@ async def bootstrap_wallet_history(
     mature = False
     oldest: datetime | None = None
     newest: datetime | None = None
+    pages_this_run = 0
 
     async def evidence() -> tuple[int, int, datetime | None, datetime | None]:
         count = int(await session.scalar(
@@ -240,21 +242,33 @@ async def bootstrap_wallet_history(
                 "termination_reason": reason,
                 "next_offset": offset,
                 "end_timestamp": end_ts,
+                "window_oldest": window_oldest,
                 "requests_used": requests,
                 "settlement_checked": settlement_checked,
             },
         ))
         await session.commit()
 
-    while pages < max_pages and rows_fetched < max_trades and requests < max_requests:
+    while (pages < max_pages and rows_fetched < max_trades
+           and requests < max_requests
+           and pages_this_run < getattr(settings, "bootstrap_pages_per_run", max_pages)):
+        if offset >= 10000:
+            if window_oldest is None or int(window_oldest) >= end_ts:
+                termination = "configured_limit_reached"
+                break
+            end_ts = int(window_oldest)  # inclusive: boundary trades can overlap
+            offset = 0
+            await persist_progress()
         # Reserve the request and page slot before hitting the network. A
         # process interruption cannot silently reset the hard budget.
         pages += 1
+        pages_this_run += 1
         requests += 1
         await persist_progress()
+        requested_limit = min(page_size, max_trades - rows_fetched, 10000 - offset)
         try:
             raw = await client.get_trades(
-                wallet.address, limit=min(page_size, max_trades - rows_fetched),
+                wallet.address, limit=requested_limit,
                 offset=offset, start=1, end=end_ts,
             )
         except (PolymarketAPIError, ValueError, OSError) as exc:
@@ -273,6 +287,7 @@ async def bootstrap_wallet_history(
                 continue
         if parsed_times:
             page_oldest, page_newest = min(parsed_times), max(parsed_times)
+            window_oldest = int(page_oldest.timestamp())
             oldest = min(_aware_utc(oldest), page_oldest) if oldest else page_oldest
             newest = max(_aware_utc(newest), page_newest) if newest else page_newest
 
@@ -293,6 +308,13 @@ async def bootstrap_wallet_history(
         remaining_settlement_markets = max(
             0, settings.bootstrap_max_settlement_markets - len(settlement_checked)
         )
+        # A satisfied settlement gate needs no further Gamma calls; older
+        # trade pages may still be required solely to establish account age.
+        current_settled = int(await session.scalar(
+            select(func.count(func.distinct(Settlement.market_id)))
+            .join(Trade, Trade.market_id == Settlement.market_id)
+            .where(Trade.wallet_id == wallet.id)
+        ) or 0)
         market_rows = (await session.execute(
             select(Market.condition_id)
             .join(Trade, Trade.market_id == Market.id)
@@ -301,7 +323,10 @@ async def bootstrap_wallet_history(
             .where(Market.condition_id.not_in(settlement_checked))
             .group_by(Market.id, Market.condition_id)
             .order_by(func.min(Trade.traded_at))
-            .limit(min(remaining_settlement_markets, max(0, (max_requests - requests) // 2)))
+            .limit(min(
+                remaining_settlement_markets if current_settled < MIN_SETTLED_MARKETS else 0,
+                max(0, (max_requests - requests) // 2),
+            ))
         )).scalars().all()
         if market_rows:
             # Count worst-case exact lookup plus validated token fallback per
@@ -342,7 +367,7 @@ async def bootstrap_wallet_history(
         if mature:
             termination = "maturity_satisfied"
             break
-        if len(raw) < page_size:
+        if len(raw) < requested_limit:
             termination = "history_exhausted"
             break
         if requests >= max_requests or pages >= max_pages or rows_fetched >= max_trades:
@@ -352,10 +377,10 @@ async def bootstrap_wallet_history(
     count, settled_count, db_oldest, db_newest = await evidence()
     oldest = min(_aware_utc(oldest), _aware_utc(db_oldest)) if oldest and db_oldest else (db_oldest or oldest)
     newest = max(_aware_utc(newest), _aware_utc(db_newest)) if newest and db_newest else (db_newest or newest)
-    if termination == "configured_limit_reached" and not (
-        pages >= max_pages or rows_fetched >= max_trades or requests >= max_requests
-    ):
-        termination = "maturity_satisfied" if mature else "history_exhausted"
+    if (termination == "configured_limit_reached" and not mature
+            and pages_this_run >= getattr(settings, "bootstrap_pages_per_run", max_pages)
+            and pages < max_pages and rows_fetched < max_trades and requests < max_requests):
+        termination = "in_progress"
     record = {
         "wallet": wallet.address,
         "wallet_id": wallet.id,
@@ -372,6 +397,7 @@ async def bootstrap_wallet_history(
         "termination_reason": termination,
         "next_offset": offset,
         "end_timestamp": end_ts,
+        "window_oldest": window_oldest,
         "requests_used": requests,
         "settlement_checked": settlement_checked,
     }
@@ -563,12 +589,21 @@ async def run_ingestion_cycle(
     quarantined_rows = 0
     for wallet in wallets:
         try:
-            result = await ingest_wallet_trades(session, client, wallet)
+            if wallet.approval_state == "approved":
+                from polycopy.ingestion.catchup import ingest_approved_wallet
+
+                result = await ingest_approved_wallet(session, client, wallet)
+            else:
+                result = await ingest_wallet_trades(session, client, wallet)
             results[wallet.address] = result.inserted
             quarantined_rows += result.quarantined
         except Exception as exc:
             failed_wallets += 1
             await session.rollback()
+            # Rollback expires identity-map objects; reload the tracked
+            # wallets before a later wallet or caller reads their state.
+            for tracked in wallets:
+                await session.refresh(tracked)
             results[wallet.address] = 0
             signature = (wallet.address, type(exc).__name__, str(exc))
             decision = _wallet_failure_throttle.record(signature)
