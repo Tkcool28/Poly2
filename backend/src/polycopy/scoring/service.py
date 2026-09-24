@@ -32,6 +32,7 @@ from polycopy.accounting.service import (
     compute_wallet_accounting,
     compute_wallet_accounting_for_decision_window,
 )
+from polycopy.ingestion.client import PolymarketClient
 from polycopy.logging_config import get_logger
 from polycopy.models import (
     ApprovalQueueEntry,
@@ -239,7 +240,10 @@ async def score_wallet(
 
 
 async def score_all_wallets(
-    session: AsyncSession, *, now: datetime | None = None
+    session: AsyncSession,
+    client: PolymarketClient,
+    *,
+    now: datetime | None = None,
 ) -> dict[str, str]:
     """Score every discovered/pending_review wallet. One failure never
     stops the run. Returns {address: verdict}."""
@@ -258,6 +262,16 @@ async def score_all_wallets(
     results: dict[str, str] = {}
     for wallet in wallets:
         try:
+            # Candidate-only backfill is synchronous and bounded. Ordinary
+            # approved-wallet live tailing does not call this path.
+            from polycopy.ingestion.service import bootstrap_wallet_history
+
+            bootstrap = await bootstrap_wallet_history(session, client, wallet, now=now)
+            if bootstrap.get("termination_reason") == "upstream_error":
+                # Do not persist a score from a snapshot whose requested
+                # bootstrap page failed; the next operator run can resume.
+                results[wallet.address] = "insufficient_history"
+                continue
             result = await score_wallet(session, wallet, now=now)
             results[wallet.address] = result.verdict
         except Exception:

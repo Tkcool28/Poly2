@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.db import get_db
+from polycopy.ingestion.client import PolymarketClient
 from polycopy.models import (
     ApprovalQueueEntry,
     DecisionLogEntry,
@@ -206,9 +207,40 @@ async def run_scoring(db: AsyncSession = Depends(get_db)) -> dict:
     Chunk 2: candidate discovery is manual, so scoring runs on demand
     (operator or cron hitting this route), not in the trading bot loop.
     """
-    verdicts = await score_all_wallets(db)
+    has_candidates = bool(await db.scalar(
+        select(func.count(Wallet.id)).where(
+            Wallet.approval_state.in_(["discovered", "pending_review"])
+        )
+    ))
+    if not has_candidates:
+        return {"scored": 0, "verdicts": {}}
+    async with PolymarketClient() as client:
+        verdicts = await score_all_wallets(db, client)
     await db.commit()
     return {"scored": len(verdicts), "verdicts": verdicts}
+
+
+@router.get("/wallets/{wallet_id}/bootstrap")
+async def get_wallet_bootstrap(wallet_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """Latest bounded history-bootstrap evidence for operator diagnosis."""
+    wallet = await db.get(Wallet, wallet_id)
+    if wallet is None:
+        raise HTTPException(status_code=404, detail="wallet not found")
+    rows = (await db.execute(
+        select(DecisionLogEntry)
+        .where(
+            DecisionLogEntry.action == "wallet_historical_bootstrap",
+            DecisionLogEntry.context["wallet_id"].as_integer() == wallet_id,
+        )
+        .order_by(DecisionLogEntry.id.desc())
+        .limit(1)
+    )).scalars().all()
+    latest = rows[0].context if rows else None
+    return {
+        "wallet_id": wallet_id,
+        "approval_state": wallet.approval_state,
+        "status": latest,
+    }
 
 
 @router.get("/approval-queue")

@@ -118,15 +118,30 @@ class PolymarketClient:
 
     # --- Data API --------------------------------------------------------
 
-    async def get_trades(self, wallet: str, *, limit: int = 500) -> list[dict[str, Any]]:
+    async def get_trades(
+        self,
+        wallet: str,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+        start: int | None = None,
+        end: int | None = None,
+    ) -> list[dict[str, Any]]:
         """Trade history for one wallet, most recent first.
 
-        ``limit`` is hard-capped by the caller (service enforces the
-        configured batch size); this method never paginates beyond one
-        request.
+        ``limit`` is hard-capped by the caller. Offset/start/end are exposed
+        for the explicitly bounded candidate bootstrap; ordinary tailing
+        continues to use the default single request.
         """
+        params: dict[str, Any] = {"user": wallet, "limit": limit}
+        if offset:
+            params["offset"] = offset
+        if start is not None:
+            params["start"] = start
+        if end is not None:
+            params["end"] = end
         return await self._get(
-            f"{DATA_API_BASE}/trades", params={"user": wallet, "limit": limit}
+            f"{DATA_API_BASE}/trades", params=params
         )
 
     async def get_positions(self, wallet: str) -> list[dict[str, Any]]:

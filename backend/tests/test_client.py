@@ -33,6 +33,21 @@ async def test_get_trades_hits_data_api():
     assert trades == [{"transactionHash": "0x1"}]
 
 
+async def test_get_trades_passes_documented_offset_and_time_window():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, json=[])
+
+    async with _client(handler) as client:
+        await client.get_trades("0xabc", limit=100, offset=200, start=1, end=123456)
+    assert seen == {
+        "user": "0xabc", "limit": "100", "offset": "200",
+        "start": "1", "end": "123456",
+    }
+
+
 async def test_gamma_market_parses_json_encoded_strings():
     """Gamma returns clobTokenIds/outcomes as JSON strings."""
 
