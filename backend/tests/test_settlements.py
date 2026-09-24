@@ -1,4 +1,4 @@
-"""Settlement feed: strict winner detection, fail-closed writes."""
+"""Settlement feed: historical lookup, strict winner detection, fail-closed writes."""
 
 from __future__ import annotations
 
@@ -14,18 +14,32 @@ os.environ.setdefault("POLYCOPY_ENVIRONMENT", "test")
 
 from polycopy.accounting.settlements import detect_winning_outcome, refresh_settlements
 from polycopy.ingestion.client import PolymarketClient
-from polycopy.models import Base, Market, Settlement
+from polycopy.models import Base, Market, Settlement, Trade, Wallet
 
 # --- Pure detection logic -------------------------------------------------
 
 _DEFAULT = object()
 
 
-def _gamma(closed=True, outcomes=None, prices=_DEFAULT):
+def _gamma(
+    condition_id="0xcond",
+    *,
+    closed=True,
+    outcomes=None,
+    prices=_DEFAULT,
+    tokens=None,
+    question="Recovered historical question",
+    slug="recovered-historical-market",
+):
     return {
+        "conditionId": condition_id,
+        "question": question,
+        "slug": slug,
         "closed": closed,
+        "active": not closed,
         "outcomes": outcomes if outcomes is not None else ["Up", "Down"],
         "outcomePrices": prices if prices is not _DEFAULT else '["1", "0"]',
+        "clobTokenIds": tokens if tokens is not None else ["4667", "8761"],
     }
 
 
@@ -44,12 +58,12 @@ def test_open_market_is_never_settled():
 @pytest.mark.parametrize(
     "prices",
     [
-        '["0.5", "0.5"]',  # not resolved yet, mid prices
-        '["1", "1"]',  # corrupt: two winners
-        '["0", "0"]',  # corrupt: no winner
-        '["0.99", "0.01"]',  # near but not final
-        "not json",  # garbage
-        None,  # missing
+        '["0.5", "0.5"]',
+        '["1", "1"]',
+        '["0", "0"]',
+        '["0.99", "0.01"]',
+        "not json",
+        None,
     ],
 )
 def test_ambiguous_prices_never_settle(prices):
@@ -57,7 +71,9 @@ def test_ambiguous_prices_never_settle(prices):
 
 
 def test_length_mismatch_never_settles():
-    assert detect_winning_outcome(_gamma(outcomes=["Up"], prices='["1", "0"]')) is None
+    assert detect_winning_outcome(
+        _gamma(outcomes=["Up"], prices='["1", "0"]')
+    ) is None
 
 
 # --- DB-backed refresh ----------------------------------------------------
@@ -83,10 +99,27 @@ async def session():
 
 
 def _client_with(markets_by_condition: dict[str, dict]) -> PolymarketClient:
+    """Simulate Gamma's historical behavior: closed rows require closed=true."""
+
     def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "gamma-api.polymarket.com"
+        assert request.url.params.get("closed") == "true"
         cond = request.url.params.get("condition_ids", "")
-        market = markets_by_condition.get(cond)
-        return httpx.Response(200, json=[market] if market else [])
+        if cond:
+            market = markets_by_condition.get(cond)
+            if market and market.get("closed"):
+                return httpx.Response(200, json=[market])
+            return httpx.Response(200, json=[])
+
+        token_id = request.url.params.get("clob_token_ids", "")
+        for market in markets_by_condition.values():
+            if (
+                market.get("closed")
+                and token_id
+                and token_id in {str(v) for v in market.get("clobTokenIds", [])}
+            ):
+                return httpx.Response(200, json=[market])
+        return httpx.Response(200, json=[])
 
     transport = httpx.MockTransport(handler)
     return PolymarketClient(http_client=httpx.AsyncClient(transport=transport))
@@ -99,65 +132,141 @@ async def _add_market(session, condition_id, closed=False):
     return m
 
 
-async def test_refresh_settles_closed_market(session):
+async def _add_trade_for_market(session, market: Market, asset_id: str):
+    wallet = Wallet(address="0x" + "a" * 40, approval_state="discovered")
+    session.add(wallet)
+    await session.flush()
+    trade = Trade(
+        polymarket_trade_id=f"test:{market.condition_id}:{asset_id}",
+        market_id=market.id,
+        wallet_id=wallet.id,
+        asset_id=asset_id,
+        side="BUY",
+        outcome="Up",
+        size=1,
+        price=0.5,
+        fee=0,
+        traded_at=market.created_at,
+    )
+    session.add(trade)
+    await session.commit()
+
+
+async def test_refresh_settles_closed_market_with_explicit_historical_lookup(session):
     await _add_market(session, "0xcond1")
-    client = _client_with({"0xcond1": _gamma()})
+    client = _client_with({"0xcond1": _gamma("0xcond1")})
     stats = await refresh_settlements(session, client)
-    assert stats == {"checked": 1, "settled": 1, "skipped_ambiguous": 0, "errors": 0}
+
+    assert stats == {
+        "checked": 1,
+        "settled": 1,
+        "skipped_ambiguous": 0,
+        "not_found_or_open": 0,
+        "token_fallback_hits": 0,
+        "metadata_backfilled": 1,
+        "errors": 0,
+    }
 
     settlement = (await session.execute(select(Settlement))).scalar_one()
     assert settlement.winning_outcome == "Up"
     market = (await session.execute(select(Market))).scalar_one()
     assert market.closed is True
     assert market.resolved_outcome == "Up"
+    assert market.question == "Recovered historical question"
+    assert market.slug == "recovered-historical-market"
+    assert market.outcomes == ["Up", "Down"]
+    assert market.clob_token_ids == {"Up": "4667", "Down": "8761"}
 
 
-async def test_refresh_skips_open_and_ambiguous(session):
+async def test_refresh_open_market_is_visible_as_not_found_or_open(session):
     await _add_market(session, "0xopen")
+    client = _client_with({"0xopen": _gamma("0xopen", closed=False)})
+    stats = await refresh_settlements(session, client)
+
+    assert stats["settled"] == 0
+    assert stats["not_found_or_open"] == 1
+    assert stats["skipped_ambiguous"] == 0
+    assert (await session.scalar(select(func.count(Settlement.id)))) == 0
+
+
+async def test_refresh_closed_ambiguous_market_is_skipped(session):
     await _add_market(session, "0xambig")
     client = _client_with(
-        {
-            "0xopen": _gamma(closed=False),
-            "0xambig": _gamma(prices='["1", "1"]'),
-        }
+        {"0xambig": _gamma("0xambig", prices='["1", "1"]')}
     )
     stats = await refresh_settlements(session, client)
+
     assert stats["settled"] == 0
     assert stats["skipped_ambiguous"] == 1
+    assert stats["metadata_backfilled"] == 1
     assert (await session.scalar(select(func.count(Settlement.id)))) == 0
 
 
 async def test_refresh_is_idempotent(session):
     await _add_market(session, "0xcond1")
-    client = _client_with({"0xcond1": _gamma()})
+    client = _client_with({"0xcond1": _gamma("0xcond1")})
     await refresh_settlements(session, client)
     stats = await refresh_settlements(session, client)
-    assert stats["checked"] == 0  # already settled → not re-queried
+
+    assert stats["checked"] == 0
     assert (await session.scalar(select(func.count(Settlement.id)))) == 1
 
 
 async def test_refresh_settles_historical_closed_market_without_settlement_row(session):
-    """REVIEW REGRESSION: a market ingested with closed=True from Gamma
-    metadata (historical market, traded before we tracked it) has no
-    Settlement row. It must REMAIN eligible for settlement refresh —
-    filtering on Market.closed would orphan its paper positions forever.
-    """
     await _add_market(session, "0xhist", closed=True)
-    client = _client_with({"0xhist": _gamma()})
+    client = _client_with({"0xhist": _gamma("0xhist")})
     stats = await refresh_settlements(session, client)
+
     assert stats["settled"] == 1
     settlement = (await session.execute(select(Settlement))).scalar_one()
     assert settlement.winning_outcome == "Up"
 
 
-async def test_refresh_closed_market_ambiguous_winner_is_skipped(session):
-    """closed=True locally but Gamma's winner data is ambiguous → skip,
-    never guess. (Covers the newly-eligible closed market path.)"""
-    await _add_market(session, "0xambig", closed=True)
-    client = _client_with({"0xambig": _gamma(prices='["1", "1"]')})
+async def test_refresh_falls_back_to_observed_asset_id(session):
+    market = await _add_market(session, "0xhist")
+    await _add_trade_for_market(session, market, "777")
+
+    gamma = _gamma(
+        "0xhist",
+        tokens=["777", "888"],
+        prices='["0", "1"]',
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params.get("closed") == "true"
+        if request.url.params.get("condition_ids"):
+            return httpx.Response(200, json=[])
+        assert request.url.params.get("clob_token_ids") == "777"
+        return httpx.Response(200, json=[gamma])
+
+    transport = httpx.MockTransport(handler)
+    client = PolymarketClient(http_client=httpx.AsyncClient(transport=transport))
     stats = await refresh_settlements(session, client)
+
+    assert stats["settled"] == 1
+    assert stats["token_fallback_hits"] == 1
+    settlement = (await session.execute(select(Settlement))).scalar_one()
+    assert settlement.winning_outcome == "Down"
+
+
+async def test_token_fallback_wrong_condition_never_settles(session):
+    market = await _add_market(session, "0xexpected")
+    await _add_trade_for_market(session, market, "777")
+
+    wrong = _gamma("0xwrong", tokens=["777", "888"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("condition_ids"):
+            return httpx.Response(200, json=[])
+        return httpx.Response(200, json=[wrong])
+
+    transport = httpx.MockTransport(handler)
+    client = PolymarketClient(http_client=httpx.AsyncClient(transport=transport))
+    stats = await refresh_settlements(session, client)
+
     assert stats["settled"] == 0
-    assert stats["skipped_ambiguous"] == 1
+    assert stats["token_fallback_hits"] == 0
+    assert stats["not_found_or_open"] == 1
     assert (await session.scalar(select(func.count(Settlement.id)))) == 0
 
 
@@ -169,10 +278,13 @@ async def test_gamma_error_does_not_stop_other_markets(session):
         cond = request.url.params.get("condition_ids", "")
         if cond == "0xbad":
             return httpx.Response(503, text="down")
-        return httpx.Response(200, json=[_gamma()])
+        if cond == "0xgood":
+            return httpx.Response(200, json=[_gamma("0xgood")])
+        return httpx.Response(200, json=[])
 
     transport = httpx.MockTransport(handler)
     client = PolymarketClient(http_client=httpx.AsyncClient(transport=transport))
     stats = await refresh_settlements(session, client)
+
     assert stats["errors"] == 1
     assert stats["settled"] == 1

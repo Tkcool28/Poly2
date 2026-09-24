@@ -33,6 +33,7 @@ def _trade(tx="0xtx1", wallet="0xWALLET1", ts=1789795243, size=5, price=0.5,
 
 
 GAMMA_MARKET = {
+    "conditionId": "0xcond1",
     "question": "Will it rain?",
     "slug": "will-it-rain",
     "clobTokenIds": '["4667", "8761"]',
