@@ -17,6 +17,7 @@ export default function Overview() {
   const wallets = useApi(api.wallets);
   const queue = useApi(api.approvalQueue, 30000);
   const health = useApi(api.healthDeps, 60000);
+  const evidence = useApi(api.paperEvidence, 60000);
 
   const totals = positions.data?.totals;
   const following =
@@ -28,7 +29,7 @@ export default function Overview() {
   return (
     <PageShell title="Home">
       <LoadError
-        error={positions.error ?? signals.error ?? wallets.error ?? null}
+        error={positions.error ?? signals.error ?? wallets.error ?? evidence.error ?? null}
       />
 
       {/* Practice P&L hero */}
@@ -49,6 +50,32 @@ export default function Overview() {
           Not real money — this is what copying would have made or lost.
         </div>
       </div>
+
+      {evidence.data && evidence.data.items.length > 0 && (
+        <div className="mt-4 space-y-2">
+          <h3 className="text-sm font-semibold text-gray-300">Paper copy evidence</h3>
+          {evidence.data.items.map((wallet) => (
+            <div key={wallet.wallet_id} className="rounded-xl bg-gray-900 p-3 text-sm">
+              <div className="font-medium text-gray-200">{wallet.wallet}</div>
+              <div className="mt-1 text-gray-400">
+                {wallet.source_trades_observed} observed · {wallet.copied_trades} copied · {wallet.misses} missed
+                {wallet.stale_signals > 0 ? ` (${wallet.stale_signals} stale)` : ""}
+              </div>
+              <div className="mt-1 text-gray-400">
+                Copy rate {wallet.copy_rate === null ? "pending" : `${Math.round(wallet.copy_rate * 100)}%`}
+                {wallet.median_detection_lag_seconds !== null
+                  ? ` · Median lag ${wallet.median_detection_lag_seconds}s` : ""}
+                {` · Realized ${fmtSignedUsd(wallet.copied_realized_pnl_usd)}`}
+              </div>
+              {!wallet.source_wallet_performance_comparison.available && (
+                <div className="mt-1 text-xs text-gray-500">
+                  Source profit comparison unavailable for the same observed window.
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="mt-3 grid grid-cols-3 gap-2 text-center">
         <div className="rounded-xl bg-gray-900 p-3">

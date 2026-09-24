@@ -1,13 +1,15 @@
 # Polycopy (rebuild)
 
-Smart-wallet discovery, scoring, and copy-trading for Polymarket.
-**Paper-first, fail-closed.** This rebuild replaces the original SQLite-based
-Polycopy with a PostgreSQL + Redis + event-driven architecture.
+Smart-wallet discovery, scoring, and paper copy-trading for Polymarket.
+**Paper-first, fail-closed.** PostgreSQL owns trades, scores, signals,
+positions, and deduplication; Redis remains future infrastructure.
 
-> **Chunk 1 status:** scaffolding only. The full stack runs (Postgres, Redis,
-> FastAPI, React dashboard, nginx, bot skeleton) but nothing ingests data,
-> scores wallets, or trades — that lands in Chunk 2. There is **no live
-> trading code anywhere in this repo.**
+> **Production baseline (2026-09-24):** main
+> `a3dd0469b9e3c1be2185f05f50a96b0ba21ecaac` has candidate bootstrap,
+> scoring, human approval, bounded bot ingestion, paper execution, dashboard,
+> and a kill switch that remains ON. Draft PRs #16–#19 propose the additional
+> paper readiness integration; they are not merged or deployed. There is no
+> live trading code in this repository.
 
 ## Quick start
 
@@ -50,6 +52,8 @@ host Caddy endpoint (with the appropriate credentials):
 /api/signals
 /api/positions
 /api/approval-queue
+/api/paper/evidence                 # after proposed PR #19 is deployed
+/api/paper/backlog                  # after proposed PR #19 is deployed
 ```
 
 Production reboot, update, backup, restore-drill, logging, and systemd
@@ -61,8 +65,8 @@ procedures are in [production operations](docs/production-operations.md).
 |---|---|
 | Backend | Python 3.12, FastAPI, SQLAlchemy 2.0 (async), Alembic |
 | Database | PostgreSQL 15 |
-| Cache/queue | Redis 7 |
-| Bot | asyncio daemon (skeleton in Chunk 1) |
+| Future cache/queue | Redis 7 (no signal ownership today) |
+| Bot | Bounded asyncio ingestion, settlement, scoring, paper execution |
 | Frontend | React 18, TypeScript, Tailwind CSS, Vite |
 | Infra | Docker Compose, nginx, systemd unit |
 
@@ -73,8 +77,8 @@ procedures are in [production operations](docs/production-operations.md).
   `POLYCOPY_ALLOW_LIVE_TRADING=false`.
 - Live trading does not exist until Chunk 3, gated behind
   `POLYCOPY_ALLOW_LIVE_TRADING=true` and a working `ExecutionBroker`.
-- Ingestion (Chunk 2) has hard batch-size and concurrency caps so the
-  database can never be hammered into OOM.
+- Ingestion has per-cycle batch/concurrency limits; the proposed bounded
+  recovery and candidate-bootstrap paths also have separate hard caps.
 
 See `docs/safety.md` and `docs/architecture.md`.
 

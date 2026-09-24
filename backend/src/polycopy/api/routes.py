@@ -201,12 +201,7 @@ async def get_wallet_score(
 
 @router.post("/scoring/run")
 async def run_scoring(db: AsyncSession = Depends(get_db)) -> dict:
-    """Operator-triggered scoring pass over discovered/pending wallets.
-
-    This endpoint is the runtime owner of ``score_all_wallets`` in
-    Chunk 2: candidate discovery is manual, so scoring runs on demand
-    (operator or cron hitting this route), not in the trading bot loop.
-    """
+    """Optional operator-triggered scoring; bot owns the hourly cadence."""
     has_candidates = bool(await db.scalar(
         select(func.count(Wallet.id)).where(
             Wallet.approval_state.in_(["discovered", "pending_review"])
@@ -241,6 +236,22 @@ async def get_wallet_bootstrap(wallet_id: int, db: AsyncSession = Depends(get_db
         "approval_state": wallet.approval_state,
         "status": latest,
     }
+
+
+@router.get("/wallets/{wallet_id}/catch-up")
+async def get_wallet_catch_up(wallet_id: int, db: AsyncSession = Depends(get_db)) -> dict:
+    """Latest approved-wallet continuity checkpoint and incomplete reason."""
+    wallet = await db.get(Wallet, wallet_id)
+    if wallet is None:
+        raise HTTPException(status_code=404, detail="wallet not found")
+    latest = (await db.execute(
+        select(DecisionLogEntry)
+        .where(DecisionLogEntry.action == "wallet_catch_up",
+               DecisionLogEntry.context["wallet_id"].as_integer() == wallet_id)
+        .order_by(DecisionLogEntry.id.desc()).limit(1)
+    )).scalar_one_or_none()
+    return {"wallet_id": wallet_id, "approval_state": wallet.approval_state,
+            "status": latest.context if latest else None}
 
 
 @router.get("/approval-queue")

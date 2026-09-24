@@ -1,12 +1,15 @@
 # Architecture
 
-```
-Polymarket API ──> Trade Ingestion ──> PostgreSQL ──> Scoring Engine ──> Approval Queue
-                        │                                        │
-                        └──> Redis (signal buffer/dedup)         └──> Watchlist
-                                                                        │
-Dashboard (React) <── nginx <── FastAPI <── Tailing Bot <── approved wallets only
-```
+Polymarket Data/Gamma/CLOB APIs feed the bot; PostgreSQL stores the canonical
+trades, settlement evidence, scores, approval states, signals, paper orders,
+positions, decisions, and heartbeat state. FastAPI serves read/approval APIs
+through nginx to the React dashboard. Redis runs as future infrastructure;
+it does not buffer signals or own deduplication in this milestone.
+
+**Authority:** deployed production main remains
+`a3dd0469b9e3c1be2185f05f50a96b0ba21ecaac` until the separately
+reviewed PRs #16–#19 are merged and deployed. The behavior below describes
+the proposed combined code, not the currently deployed VPS.
 
 ## Chunk 2 (current)
 
@@ -21,16 +24,17 @@ Runtime ownership (PR #7 hardening — the concrete autonomous path):
 | Concern | Runtime owner |
 |---|---|
 | Ingestion (`run_ingestion_cycle`) | **bot daemon**, every cycle |
-| Settlement refresh (`refresh_settlements`) | **bot daemon**, every cycle |
+| Due settlement refresh (`refresh_settlements`) | **bot daemon**, at most 10 markets per cycle, persisted backoff |
 | Paper settlement (`settle_paper_positions`) | **bot daemon**, inside `run_execution_cycle` |
 | Signal detection + paper execution | **bot daemon**, inside `run_execution_cycle` |
-| Wallet scoring (`score_all_wallets`) | **API**: `POST /scoring/run` (operator or cron) |
+| Wallet scoring (`score_all_wallets`) | **bot daemon**, every 3600 seconds; API `POST /scoring/run` remains an optional operator override |
 | Human approval | **API**: `POST /wallets/{id}/{action}` |
+| Successful-cycle watchdog | **independent watchdog container**, reads Postgres and exposes Docker health failure |
 
 Candidate-wallet DISCOVERY is intentionally still manual in Chunk 2:
 wallets enter via `POST /wallets` (dashboard "Add wallet" form on the
 Wallets tab), then are scored, reviewed, and approved by a human. New
-wallets land in `discovered` — ingestion tails them for scoring, but
+wallets land in `discovered` — bounded history bootstrap provides scoring data, but
 nothing becomes copyable before human approval. The full loop `ingest → settle → score → pending review → human
 approval → tail → paper execute → paper settle` has a named owner at
 every step.
@@ -41,6 +45,7 @@ every step.
 |---|---|---|
 | `postgres` | System of record | Schema applied via Alembic `migrate` job |
 | `redis` | Signal buffer / dedup (future) | Running, health-checked |
+| `watchdog` | Independent bot-success check | Alerts and becomes unhealthy if successful cycles stop |
 | `backend` | FastAPI | `/health`, `/system/status`, `/config`, `/wallets`, `/signals`, `/approval-queue`, score + approve/reject/disable endpoints |
 | `bot` | Tailing daemon | Poll → ingest → settle → signal → paper fill loop; paper only, kill-switch gated |
 | `frontend` | React dashboard | Shell pages + live safety banner from `/system/status` |
@@ -49,7 +54,7 @@ every step.
 
 ## Data model
 
-Tables: `wallets`, `markets`, `trades`, `settlements`, `wallet_scores`,
+Tables: `wallets`, `markets`, `trades`, `settlements`, `api_throttles`, `wallet_scores`,
 `signals`, `approval_queue`, `paper_orders`, `positions`, `decision_log`,
 `service_heartbeats`.
 
@@ -67,6 +72,15 @@ Key constraints baked into the schema:
 - `markets.clob_token_ids` / `trades.asset_id` — the tradable identity on
   Polymarket is the CLOB token, not human-readable outcome text.
 - Wallet approval has a single source of truth: `approval_state`.
+
+Approved-wallet continuity and candidate-bootstrap cursors are append-only
+`decision_log` checkpoints. Canonical IDs and database uniqueness remain the
+deduplication authority. Gamma settlement scheduling lives on `markets`, with
+cross-process 429 cooldown in `api_throttles`. Source trades become signals
+only after a human-approved `approved_at` boundary. Five-minute source-to-book
+freshness and the 30-second review delay gate paper execution; the kill switch
+remains ON in production. Paper evidence is queried from PostgreSQL and
+summarized for humans in `reports/PAPER_TRADING_RUN_LOG.md`.
 
 ## Why PostgreSQL (not SQLite)
 

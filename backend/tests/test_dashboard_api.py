@@ -151,6 +151,27 @@ async def test_signals_carry_context_and_copy_result(client, session):
     assert order["status"] == "filled"
     assert order["fill_price"] == pytest.approx(0.46)
     assert order["fee"] == pytest.approx(0.10)
+    assert item["source_trade_id"] == "t-1"
+    assert item["eligible_at"] is not None
+    assert item["detection_lag_seconds"] == 60
+    assert item["kill_switch_deferrals"] == 0
+
+
+async def test_paper_evidence_api_exposes_copy_metrics_without_inventing_source_pnl(
+    client, session
+):
+    await _seed(session)
+    result = client.get("/paper/evidence")
+    assert result.status_code == 200
+    row = result.json()["items"][0]
+    assert row["signals_generated"] == 1
+    assert row["copied_trades"] == 1
+    assert row["median_detection_lag_seconds"] == 60
+    assert row["median_adverse_slippage"] == pytest.approx(0.01)
+    assert row["source_wallet_performance_comparison"]["available"] is False
+    backlog = client.get("/paper/backlog").json()
+    assert backlog["pending"] == 0
+    assert backlog["kill_switch_enabled"] is True
 
 
 async def test_signal_without_order_reports_null_copy_result(client, session):
