@@ -26,7 +26,7 @@ sizing, or touch the kill switch.
 
 | Tab | Endpoint | Notes |
 | --- | --- | --- |
-| Home | `/positions`, `/signals`, `/wallets`, `/approval-queue`, `/health/deps` | Headline = realized practice P&L from `positions.totals` |
+| Home | `/positions`, `/signals`, `/wallets`, `/approval-queue`, `/health/deps`, `/paper/evidence` | Headline = realized practice P&L; proposed paper evidence cards show per-wallet copy rate and misses after PR #19 deploys |
 | Activity | `/signals` | Each item embeds market question, wallet, and the paper-order result |
 | Portfolio | `/positions` | Open = `quantity > 0 && settled_at == null`; totals computed server-side |
 | Wallets | `/wallets` (GET + POST), POST `/wallets/{id}/disable` | Includes latest composite score; POST is manual candidate intake — the only way a wallet enters the system |
@@ -36,5 +36,8 @@ Backend payloads intentionally carry display context (market question,
 wallet address/label) so the frontend never fans out into N+1 requests
 on a mobile connection.
 
-All list endpoints are bounded (200–500 rows) — the VPS OOM lesson
-applies to read paths too.
+Display lists remain bounded (200–500 rows); paper evidence uses lifetime DB
+aggregates and bounded distribution samples, with truncation flags. The VPS
+OOM lesson applies to read paths too. The evidence API explicitly marks
+source-side performance comparison unavailable when the matching outcome data
+cannot be reconciled.

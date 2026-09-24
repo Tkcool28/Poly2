@@ -31,7 +31,7 @@ Do not use `docker compose down -v`: the `postgres_data` Docker volume contains
 the production database. Find its actual host path with
 `sudo docker volume inspect "$(sudo docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"] + "_postgres_data")')"`.
 
-All six long-running services use `restart: unless-stopped`. A container crash,
+All long-running services use `restart: unless-stopped`. A container crash,
 Docker daemon restart, or VPS reboot restarts services unless an operator
 deliberately stopped them. The one-shot `migrate` service remains
 `restart: "no"`. The optional systemd Compose unit starts the stack after
@@ -66,9 +66,27 @@ Postgres, Redis, backend, frontend, and nginx have health checks. The frontend
 checks its local served root; nginx checks its local `/api/health` proxy route.
 The bot has no container-local health check: its successful-cycle heartbeat is
 stored in PostgreSQL, and a process-only check would miss a stuck or failing
-cycle. `/api/health/deps` reports the bot heartbeat; also inspect
-`sudo docker compose logs bot` if that check is stale. Docker's health status alone
-does not automatically restart an unhealthy running container.
+cycle. `/api/health/deps` reports bot heartbeat age. After the proposed PR #19
+is reviewed, merged, and deployed, a separate `watchdog` container reads the
+same DB state: it logs an error and becomes Docker-unhealthy when the latest
+successful bot cycle is over ten minutes old, even if `bot_alive` continues.
+Inspect `sudo docker compose ps watchdog` and
+`sudo docker compose logs watchdog bot`. It does not restart the bot.
+
+Before any separately authorized controlled paper trial, read
+`/api/paper/backlog` with the kill switch still ON and append the pending and
+stale counts to `reports/PAPER_TRADING_RUN_LOG.md`. Let the bot record
+`stale_signal` misses until `stale_pending` reaches zero; do not release old
+signals into the simulator. Review one human-approved wallet, maximum age,
+review delay, exposure caps, and current CLOB access. No step here authorizes
+turning the kill switch off; live trading remains disabled throughout.
+
+For each later deployment that affects paper results, append the merged PR,
+deployed SHA, migrations, full test/CI result, safe configuration, heartbeat
+and watchdog checks, and observed behavior to the run log. Read the per-wallet
+copy evidence from `/api/paper/evidence`; the Markdown ledger is not a DB
+dependency. Source-wallet performance comparisons remain explicitly unavailable
+unless outcome evidence for the same observed window is reconciled.
 
 ## Backups and restore drill
 

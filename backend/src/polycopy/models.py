@@ -249,6 +249,10 @@ class PaperOrder(Base):
     # wallet's price.
     fill_price: Mapped[float | None] = mapped_column(Numeric(10, 6))
     filled_size: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    requested_size_usd: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    book_depth_shares: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    levels_consumed: Mapped[int | None] = mapped_column(Integer)
+    realized_pnl_delta: Mapped[float | None] = mapped_column(Numeric(20, 6))
     fee: Mapped[float | None] = mapped_column(Numeric(20, 6))
     # Raw detection-time book ({"bids": [[price, size], ...], "asks": ...}).
     book_snapshot: Mapped[dict | None] = mapped_column(JSON)
@@ -278,6 +282,7 @@ class Position(Base):
     quantity: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
     avg_price: Mapped[float] = mapped_column(Numeric(10, 6), default=0)
     realized_pnl: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
+    settlement_realized_pnl: Mapped[float | None] = mapped_column(Numeric(20, 6))
     unrealized_pnl: Mapped[float] = mapped_column(Numeric(20, 6), default=0)
     # Set when this position was settled at market resolution (winner $1 /
     # loser $0). Idempotency marker: settlement runs skip settled rows.

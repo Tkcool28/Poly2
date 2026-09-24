@@ -179,6 +179,7 @@ async def _record_skip(
         size=0,
         price=0,
         status="missed",
+        requested_size_usd=get_settings().max_order_size_usd,
         t2_decided_at=now,
         miss_reason=reason,
         **order_kwargs,
@@ -335,7 +336,9 @@ async def execute_signal(
     )
     if result.status == "missed":
         order = await _record_skip(session, signal, reason="no_book_depth", now=now,
-                                   order_kwargs={"book_snapshot": snapshot})
+                                   order_kwargs={"book_snapshot": snapshot,
+                                                 "book_depth_shares": result.depth_available,
+                                                 "levels_consumed": result.levels_consumed})
         await session.commit()
         return order
 
@@ -347,7 +350,9 @@ async def execute_signal(
     if signal.side == "BUY" and result.fill_price >= Decimal(str(settings.max_copy_price)):
         order = await _record_skip(
             session, signal, reason="price_zone", now=now,
-            order_kwargs={"book_snapshot": snapshot},
+            order_kwargs={"book_snapshot": snapshot,
+                          "book_depth_shares": result.depth_available,
+                          "levels_consumed": result.levels_consumed},
         )
         await session.commit()
         return order
@@ -365,6 +370,9 @@ async def execute_signal(
         t2_decided_at=now,
         fill_price=result.fill_price,
         filled_size=result.filled_size,
+        requested_size_usd=size_usd,
+        book_depth_shares=result.depth_available,
+        levels_consumed=result.levels_consumed,
         fee=fee,
         book_snapshot=snapshot,
     )
@@ -401,11 +409,8 @@ async def execute_signal(
         position.quantity = new_qty
     else:  # SELL
         sell_qty = min(qty, result.filled_size)
-        position.realized_pnl = (
-            Decimal(str(position.realized_pnl))
-            + sell_qty * (result.fill_price - avg)
-            - fee
-        )
+        order.realized_pnl_delta = sell_qty * (result.fill_price - avg) - fee
+        position.realized_pnl = Decimal(str(position.realized_pnl)) + order.realized_pnl_delta
         position.quantity = qty - sell_qty
 
     session.add(
@@ -462,9 +467,8 @@ async def settle_paper_positions(
         avg = Decimal(str(position.avg_price))
         won = position.outcome == settlement.winning_outcome
         settle_price = Decimal(1) if won else Decimal(0)
-        position.realized_pnl = (
-            Decimal(str(position.realized_pnl)) + qty * (settle_price - avg)
-        )
+        position.settlement_realized_pnl = qty * (settle_price - avg)
+        position.realized_pnl = Decimal(str(position.realized_pnl)) + position.settlement_realized_pnl
         position.quantity = Decimal(0)
         position.settled_at = now
         stats["settled"] += 1

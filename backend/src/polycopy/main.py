@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import redis.asyncio as aioredis
 from fastapi import Depends, FastAPI
@@ -24,6 +24,7 @@ from polycopy.models import (
     Wallet,
     WalletScore,
 )
+from polycopy.paper_evidence import wallet_paper_evidence
 
 logger = get_logger("polycopy.api")
 
@@ -166,6 +167,7 @@ async def system_status(settings: Settings = Depends(get_settings)) -> dict:
         "allow_live_trading": settings.allow_live_trading,
         "order_kill_switch": settings.order_kill_switch,
         "review_delay_seconds": settings.review_delay_seconds,
+        "max_signal_execution_age_seconds": settings.max_signal_execution_age_seconds,
         "limits": {
             "max_order_size_usd": settings.max_order_size_usd,
             "max_exposure_per_market_usd": settings.max_exposure_per_market_usd,
@@ -182,6 +184,10 @@ async def config_view(settings: Settings = Depends(get_settings)) -> dict:
 
 def _iso(dt) -> str | None:
     return dt.isoformat() if dt else None
+
+
+def _aware(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 async def _latest_scores(db: AsyncSession, wallet_ids: list[int]) -> dict[int, WalletScore]:
@@ -290,9 +296,22 @@ async def list_signals(db: AsyncSession = Depends(get_db)) -> dict:
                 "side": s.side,
                 "outcome": s.outcome,
                 "source_price": float(s.source_price),
+                "source_trade_id": s.source_trade_id,
+                "eligible_at": _iso(_aware(s.t1_detected_at)
+                                    + timedelta(seconds=get_settings().review_delay_seconds)),
+                "detection_lag_seconds": round((
+                    _aware(s.t1_detected_at) - _aware(s.t0_traded_at)
+                ).total_seconds(), 3),
+                "kill_switch_deferrals": s.kill_switch_deferrals,
                 "status": s.status,
                 "t0_traded_at": _iso(s.t0_traded_at),
                 "t1_detected_at": _iso(s.t1_detected_at),
+                "source_ingested_at": _iso(s.t1_detected_at),
+                "signal_age_seconds": (
+                    round(((_aware(order.t2_decided_at) if order and order.t2_decided_at
+                            else datetime.now(UTC)) - _aware(s.t0_traded_at)).total_seconds(), 3)
+                    if s.t0_traded_at else None
+                ),
                 "created_at": _iso(s.created_at),
                 "paper_order": (
                     {
@@ -307,13 +326,61 @@ async def list_signals(db: AsyncSession = Depends(get_db)) -> dict:
                             if order.filled_size is not None else None
                         ),
                         "fee": float(order.fee) if order.fee is not None else None,
+                        "requested_size_usd": float(order.requested_size_usd) if order.requested_size_usd is not None else None,
+                        "book_depth_shares": float(order.book_depth_shares) if order.book_depth_shares is not None else None,
+                        "levels_consumed": order.levels_consumed,
+                        "book_snapshot": order.book_snapshot,
+                        "top_of_book_price": (
+                            min(float(p) for p, _ in order.book_snapshot.get("asks", []))
+                            if order.book_snapshot and s.side == "BUY" and order.book_snapshot.get("asks")
+                            else max(float(p) for p, _ in order.book_snapshot.get("bids", []))
+                            if order.book_snapshot and s.side == "SELL" and order.book_snapshot.get("bids")
+                            else None
+                        ),
+                        "adverse_slippage": (
+                            round((float(order.fill_price) - float(s.source_price))
+                                  * (1 if s.side == "BUY" else -1), 6)
+                            if order.fill_price is not None else None
+                        ),
                         "t2_decided_at": _iso(order.t2_decided_at),
+                        "executed_at": _iso(order.filled_at),
+                        "missed_at": _iso(order.t2_decided_at) if order.status == "missed" else None,
                     }
                     if order else None
                 ),
             }
         )
     return {"items": items, "count": len(items)}
+
+
+@app.get("/paper/evidence")
+async def paper_evidence(db: AsyncSession = Depends(get_db)) -> dict:
+    """Per-wallet lifetime copy evidence; DB is the system of record."""
+    wallets = (await db.execute(
+        select(Wallet).where(Wallet.approved_at.is_not(None))
+        .order_by(Wallet.id).limit(100)
+    )).scalars().all()
+    items = [await wallet_paper_evidence(db, wallet) for wallet in wallets]
+    return {"items": items, "count": len(items), "truncated": len(items) == 100}
+
+
+@app.get("/paper/backlog")
+async def paper_backlog(db: AsyncSession = Depends(get_db)) -> dict:
+    """Read-only pending/stale inventory before any controlled paper trial."""
+    settings = get_settings()
+    now = datetime.now(UTC)
+    stale_before = now - timedelta(seconds=settings.max_signal_execution_age_seconds)
+    pending = int(await db.scalar(
+        select(func.count(Signal.id)).where(Signal.status == "pending")
+    ) or 0)
+    stale = int(await db.scalar(
+        select(func.count(Signal.id)).where(
+            Signal.status == "pending", Signal.t0_traded_at < stale_before,
+        )
+    ) or 0)
+    return {"pending": pending, "stale_pending": stale,
+            "kill_switch_enabled": settings.order_kill_switch,
+            "max_signal_execution_age_seconds": settings.max_signal_execution_age_seconds}
 
 
 @app.get("/positions")

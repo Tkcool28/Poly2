@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-LONG_RUNNING = ("postgres", "redis", "backend", "bot", "frontend", "nginx")
+LONG_RUNNING = ("postgres", "redis", "backend", "bot", "watchdog", "frontend", "nginx")
 
 
 def read(path: str) -> str:
@@ -41,6 +41,7 @@ def test_frontend_and_nginx_have_local_http_checks_and_bot_omits_one():
     assert '"http://127.0.0.1/"' in parts["frontend"]
     assert '"http://127.0.0.1/api/health"' in parts["nginx"]
     assert "healthcheck:" not in parts["bot"]
+    assert '"polycopy.watchdog", "--check-once"' in parts["watchdog"]
 
 
 def test_systemd_stack_and_backup_units():

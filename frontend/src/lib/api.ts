@@ -87,6 +87,22 @@ export interface PositionsResponse {
   };
 }
 
+export interface WalletPaperEvidence {
+  wallet_id: number;
+  wallet: string;
+  approval_state: string;
+  source_trades_observed: number;
+  eligible_source_trades: number;
+  copied_trades: number;
+  partial_fills: number;
+  misses: number;
+  stale_signals: number;
+  copy_rate: number | null;
+  median_detection_lag_seconds: number | null;
+  copied_realized_pnl_usd: number;
+  source_wallet_performance_comparison: { available: boolean; reason: string };
+}
+
 export interface ApprovalItem {
   entry_id: number;
   wallet_id: number;
@@ -125,6 +141,7 @@ export const api = {
   wallets: () => request<{ items: WalletItem[]; count: number }>("/wallets"),
   signals: () => request<{ items: SignalItem[]; count: number }>("/signals"),
   positions: () => request<PositionsResponse>("/positions"),
+  paperEvidence: () => request<{ items: WalletPaperEvidence[]; count: number }>("/paper/evidence"),
   approvalQueue: () =>
     request<{ items: ApprovalItem[]; count: number }>("/approval-queue"),
   addWallet: (address: string, label?: string) =>
@@ -270,6 +287,8 @@ export function missReasonText(reason: string | null): string {
       return "Price was above the 90¢ safety limit, so it was skipped.";
     case "wallet_not_approved":
       return "This wallet was no longer approved when the trade ran.";
+    case "stale_signal":
+      return "Observed too late for a realistic paper copy; no book was requested.";
     default:
       return reason ? `Reason: ${reason}` : "Unknown reason.";
   }

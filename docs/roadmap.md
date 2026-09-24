@@ -1,4 +1,10 @@
-# Build Roadmap
+# Poly2 roadmap and deployment state
+
+**Deployed baseline (2026-09-24):** production main
+`a3dd0469b9e3c1be2185f05f50a96b0ba21ecaac` after PR #15. The dashboard,
+ingestion, scoring, approval, and paper execution components exist. Draft PRs
+#16–#19 propose the next integration milestone; their behavior is not production
+behavior until independently reviewed, merged, and deployed.
 
 ## Chunk 1 — Scaffolding + corrections
 
@@ -10,7 +16,8 @@
 - [x] CI: backend tests, frontend build, compose validation (`.github/workflows/ci.yml`)
 - [x] Corrections: independent kill-switch gate, single wallet approval state,
       first-class CLOB token identity, capacity claims corrected
-- [ ] **Nothing ingests. Nothing scores. Nothing trades.**
+- [x] Historical Chunk 1 checkpoint: no ingestion, scoring, or trading was
+      enabled at that stage. Chunk 2 implemented these features later.
 
 ## Chunk 2 — Complete paper system
 
@@ -33,7 +40,27 @@
    recheck, fee-consistent accounting, malformed-book rejection,
    per-signal failure isolation, bounded cycles, paper settlement at
    resolution, populated-schema migration safety)
-9. [ ] Dashboard wired to real data — PR-F (next)
+9. [x] Dashboard wired to PostgreSQL-backed wallet, approval, signal, position,
+   and health APIs; deployed before this milestone.
+
+## Autonomous paper readiness (draft PR stack; not yet deployed)
+
+1. [ ] PR #16 — bounded approved-wallet continuity recovery and deeper,
+   goal-aware candidate history bootstrap.
+2. [ ] PR #17 — persistent settlement scheduling, Gamma cooldown, hourly
+   automatic candidate scoring. Migration `0008`.
+3. [ ] PR #18 — source-to-paper maximum age, stale misses, durable deferrals.
+   Migration `0009`.
+4. [ ] PR #19 — evidence API/dashboard, independent watchdog, paper run ledger,
+   end-to-end harness. Migration `0010`.
+5. [ ] Independent reviews and merges in order; deploy with paper mode ON,
+   live trading OFF, kill switch ON, and no private key.
+6. [ ] Re-run full suite on **combined merged main**, migrate, verify startup,
+   heartbeats, watchdog, and backlog; record deployed SHA and evidence log.
+7. [ ] After separate operator authorization, perform a controlled real-source
+   paper test. If no suitable new source trade occurs, record that limit and
+   rely on the deterministic harness. Real settlement/P&L may take longer than
+   the test window; the milestone remains unaccepted until actually verified.
 
 ## Chunk 3 — Live trading (separate, gated PR)
 
