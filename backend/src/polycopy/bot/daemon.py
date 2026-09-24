@@ -119,11 +119,18 @@ async def run() -> None:
             try:
                 async with maker() as session:
                     stats, degraded = await run_bot_cycle(session, client)
-                async with maker() as session:
-                    next_scoring_at, verdicts = await score_candidates_if_due(
-                        session, client, next_scoring_at, clock=time.monotonic(),
+                score_clock = time.monotonic()
+                if score_clock >= next_scoring_at:
+                    due_at = next_scoring_at
+                    # Reserve the cadence before awaiting network/DB work:
+                    # an exception must not retry scoring every 15 seconds.
+                    next_scoring_at = (
+                        score_clock + max(60, settings.candidate_scoring_interval_seconds)
                     )
-                if verdicts is not None:
+                    async with maker() as session:
+                        _, verdicts = await score_candidates_if_due(
+                            session, client, due_at, clock=score_clock,
+                        )
                     logger.info("automatic_candidate_scoring", verdicts=verdicts)
 
                 if degraded:
