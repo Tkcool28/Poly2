@@ -46,7 +46,13 @@ async def _queue_wallet(session, address="0xwallet1") -> Wallet:
     session.add(
         WalletScore(
             wallet_id=wallet.id,
+            window_days=90,
             composite_score=82.5,
+            profit_factor=9.23,
+            profit_factor_90d=9.02,
+            gross_profit_90d=39564.746026,
+            gross_loss_90d=4386.018309,
+            realized_pnl_90d=35178.727718,
             behavioral_tags=[{"version": "v1", "components": {"pnl_quality": 80.0}}],
         )
     )
@@ -63,7 +69,16 @@ async def test_approval_queue_lists_pending_with_score(client, session):
     item = body["items"][0]
     assert item["address"] == "0xwallet1"
     assert item["score"]["composite_score"] == 82.5
+    assert item["score"]["profit_factor"] == pytest.approx(9.23)
+    assert item["score"]["profit_factor_90d"] == pytest.approx(9.02)
+    assert item["score"]["gross_profit_90d"] == pytest.approx(39564.746026)
+    assert item["score"]["gross_loss_90d"] == pytest.approx(4386.018309)
+    assert item["score"]["realized_pnl_90d"] == pytest.approx(35178.727718)
+    assert item["score"]["window_days"] == 90
     assert item["score"]["breakdown"]["components"]["pnl_quality"] == 80.0
+
+    # Repeated reads are deterministic and do not recompute a different window.
+    assert client.get("/approval-queue").json() == body
 
 
 async def test_get_wallet_score_404_when_unscored(client, session):
