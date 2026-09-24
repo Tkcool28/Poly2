@@ -58,7 +58,25 @@ def _score_payload(score: WalletScore) -> dict:
         "wallet_id": score.wallet_id,
         "window_days": score.window_days,
         "composite_score": score.composite_score,
+        # Lifetime field retained for existing consumers/scoring evidence.
         "profit_factor": score.profit_factor,
+        # Explicit review/display window; never substitute the lifetime value.
+        "profit_factor_90d": score.profit_factor_90d,
+        "gross_profit_90d": (
+            float(score.gross_profit_90d)
+            if score.gross_profit_90d is not None
+            else None
+        ),
+        "gross_loss_90d": (
+            float(score.gross_loss_90d)
+            if score.gross_loss_90d is not None
+            else None
+        ),
+        "realized_pnl_90d": (
+            float(score.realized_pnl_90d)
+            if score.realized_pnl_90d is not None
+            else None
+        ),
         "breakdown": breakdown,
         "computed_at": score.computed_at.isoformat() if score.computed_at else None,
     }
