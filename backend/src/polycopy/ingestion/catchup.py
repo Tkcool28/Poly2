@@ -75,8 +75,8 @@ async def ingest_approved_wallet(session: AsyncSession, client: Any, wallet: Wal
         state = {
             "anchor_id": anchor,
             "head_anchor": latest_anchor,
-            "end_timestamp": max(int(datetime.now(UTC).timestamp()),
-                                 max((int(row.get("timestamp", 0)) for row in latest), default=0)),
+            "end_timestamp": max((int(row.get("timestamp", 0)) for row in latest),
+                                 default=int(datetime.now(UTC).timestamp())),
             "next_offset": 0,
             "window_oldest": None,
             "catch_up_incomplete": True,
@@ -139,8 +139,8 @@ async def ingest_approved_wallet(session: AsyncSession, client: Any, wallet: Wal
             if head_anchor and head_anchor not in latest_keys:
                 state = {
                     "anchor_id": head_anchor,
-                    "end_timestamp": max(int(datetime.now(UTC).timestamp()),
-                                         max((int(row.get("timestamp", 0)) for row in latest), default=0)),
+                    "end_timestamp": max((int(row.get("timestamp", 0)) for row in latest),
+                                         default=int(datetime.now(UTC).timestamp())),
                     "next_offset": 0,
                     "window_oldest": None,
                 }

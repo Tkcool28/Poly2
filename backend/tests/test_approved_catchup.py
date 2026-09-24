@@ -124,3 +124,24 @@ async def test_disabled_wallet_does_not_continue_recovery(session, catchup_confi
     before = len(source.calls)
     await run_ingestion_cycle(session, source, include_unapproved=False)
     assert len(source.calls) == before
+
+
+async def test_newer_trades_arriving_during_recovery_get_a_second_frozen_window(
+    session, catchup_config
+):
+    catchup_config.catch_up_pages_per_cycle = 1
+    wallet = Wallet(address="0x" + "1" * 40, approval_state="approved")
+    session.add(wallet)
+    await session.commit()
+    source = Source([row(0)])
+    await ingest_approved_wallet(session, source, wallet)
+    source.rows = [row(i) for i in range(1200, -1, -1)]
+    await ingest_approved_wallet(session, source, wallet)
+    assert (await _state(session, wallet))["catch_up_incomplete"]
+    source.rows = [row(i) for i in range(1800, -1, -1)]
+    for _ in range(8):
+        await ingest_approved_wallet(session, source, wallet)
+        if not (await _state(session, wallet))["catch_up_incomplete"]:
+            break
+    assert not (await _state(session, wallet))["catch_up_incomplete"]
+    assert await session.scalar(select(func.count(Trade.id))) == 1801
