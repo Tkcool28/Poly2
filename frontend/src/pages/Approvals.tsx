@@ -119,8 +119,8 @@ export default function Approvals() {
                 <div className="mt-2 text-xs text-gray-400">
                   Based on the last {item.score.window_days} days of their
                   trading
-                  {item.score.profit_factor != null &&
-                    ` • made $${item.score.profit_factor.toFixed(2)} for every $1 lost`}
+                  {item.score.profit_factor_90d != null &&
+                    ` • made ${item.score.profit_factor_90d.toFixed(2)} for every $1 lost`}
                 </div>
               )}
               <div className="mt-4 grid grid-cols-2 gap-3">
