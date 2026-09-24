@@ -96,6 +96,10 @@ export interface ApprovalItem {
   score: {
     composite_score: number | null;
     profit_factor: number | null;
+    profit_factor_90d: number | null;
+    gross_profit_90d: number | null;
+    gross_loss_90d: number | null;
+    realized_pnl_90d: number | null;
     window_days: number;
   } | null;
 }
