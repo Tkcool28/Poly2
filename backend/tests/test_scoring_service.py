@@ -25,6 +25,11 @@ from polycopy.models import (
 from polycopy.scoring import score as scoring_math
 from polycopy.scoring.service import build_wallet_stats, score_all_wallets, score_wallet
 
+
+class _EmptyBootstrapClient:
+    async def get_trades(self, *_args, **_kwargs):
+        return []
+
 NOW = datetime(2026, 9, 20, tzinfo=UTC)
 
 
@@ -161,7 +166,7 @@ async def test_immature_wallet_stays_discovered_and_rescannable(session):
     assert wallet.approval_state == "discovered"  # NOT rejected
 
     # The rescan pool must include it.
-    results = await score_all_wallets(session, now=NOW)
+    results = await score_all_wallets(session, _EmptyBootstrapClient(), now=NOW)
     assert wallet.address in results
 
     # Two more settled markets arrive; next cycle re-evaluates.
@@ -268,7 +273,7 @@ async def test_score_all_wallets_isolates_failures(session):
     approved = Wallet(address="0xapproved", approval_state="approved")
     session.add(approved)
     await session.commit()
-    results = await score_all_wallets(session, now=NOW)
+    results = await score_all_wallets(session, _EmptyBootstrapClient(), now=NOW)
     assert results == {"0xstrong": "pending_review", "0xstrong2": "pending_review"}
     await session.refresh(approved)
     assert approved.approval_state == "approved"

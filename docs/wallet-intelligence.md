@@ -33,17 +33,18 @@ discovered wallet.
 - **Active within the last 14 days**
 - **Positive realized P&L** after fees
 
-**Scoring input caveat (review correction, 2026-09-21):** gates and scores
-are computed from *ingested* trades only. Ingestion is a live tail —
-most-recent `POLYCOPY_INGESTION_BATCH_SIZE` (500) per wallet per cycle,
-not a full-history backfill. A deep-history wallet can fail the trade
-count or settled-market gates spuriously on first scoring. `insufficient_history`
-is the safe, non-terminal verdict: the wallet remains eligible for future
-operator-triggered rescoring. Current ingestion does not walk backward
-through older history; it repeatedly samples the most recent bounded slice
-and adds newly observed trades over time. Never describe a score as covering
-the wallet's complete trading history unless a deliberate backfill feature
-has shipped.
+**Scoring input caveat:** gates and scores use locally ingested trades only.
+Recurring ingestion remains a live tail of the most recent
+`POLYCOPY_INGESTION_BATCH_SIZE` (500) trades per wallet per cycle. Before an
+operator scoring pass, discovered candidates use a separate bounded historical
+bootstrap (default 10 pages × 100 trades, at most 1,000 trades and 50 logical
+API requests, including bounded settlement lookups). It pages newest-first
+with Data API `offset` and a fixed `end` timestamp, then reconciles settlement
+through the existing closed Gamma market validation. It stops when the 30
+trade, 15 settled-market, and 30-day age gates can be evaluated, the upstream
+history ends, or a configured bound is reached. `insufficient_history` stays
+non-terminal. The `/wallets/{id}/bootstrap` endpoint exposes its termination
+reason and evidence. This bounded pass does not claim complete wallet history.
 
 Gate failures split into two kinds (review correction, 2026-09-20):
 

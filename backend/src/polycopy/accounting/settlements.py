@@ -22,7 +22,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.ingestion.client import (
@@ -151,6 +151,10 @@ def _backfill_market_metadata(market: Market, gamma: dict[str, Any]) -> bool:
 async def refresh_settlements(
     session: AsyncSession,
     client: PolymarketClient,
+    *,
+    wallet_id: int | None = None,
+    max_markets: int | None = None,
+    condition_ids: list[str] | None = None,
 ) -> dict[str, int]:
     """Check tracked markets without Settlement rows for resolution.
 
@@ -163,15 +167,22 @@ async def refresh_settlements(
     update is committed independently.
     """
     settled_market_ids = select(Settlement.market_id)
-    markets = (
-        (
-            await session.execute(
-                select(Market).where(Market.id.not_in(settled_market_ids))
-            )
-        )
-        .scalars()
-        .all()
-    )
+    stmt = select(Market).where(Market.id.not_in(settled_market_ids))
+    if condition_ids is not None:
+        if not condition_ids:
+            return {
+                "checked": 0, "settled": 0, "skipped_ambiguous": 0,
+                "not_found_or_open": 0, "token_fallback_hits": 0,
+                "metadata_backfilled": 0, "errors": 0,
+            }
+        stmt = stmt.where(Market.condition_id.in_(condition_ids))
+    if wallet_id is not None:
+        stmt = stmt.join(Trade, Trade.market_id == Market.id).where(
+            Trade.wallet_id == wallet_id
+        ).group_by(Market.id).order_by(func.min(Trade.traded_at))
+    if max_markets is not None:
+        stmt = stmt.limit(max_markets)
+    markets = (await session.execute(stmt)).scalars().unique().all()
 
     stats = {
         "checked": 0,
