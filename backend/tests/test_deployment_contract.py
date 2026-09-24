@@ -51,3 +51,16 @@ def test_api_ingress_and_deploy_health_url():
     assert "docker compose config --format json" in deploy
     assert 'health_url="http://${ingress_address}/api/health"' in deploy
     assert 'curl -fsS "$health_url"' in deploy
+
+
+
+def test_review_card_uses_explicit_90d_profit_factor():
+    approvals = read("frontend/src/pages/Approvals.tsx")
+    api = read("frontend/src/lib/api.ts")
+
+    assert "item.score.profit_factor_90d.toFixed(2)" in approvals
+    assert "item.score.profit_factor.toFixed(2)" not in approvals
+    assert "profit_factor_90d: number | null;" in api
+    assert "gross_profit_90d: number | null;" in api
+    assert "gross_loss_90d: number | null;" in api
+    assert "realized_pnl_90d: number | null;" in api

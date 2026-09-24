@@ -16,9 +16,10 @@ mismatch during backfill is expected and logged, never an exception.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.accounting import pnl
@@ -39,23 +40,11 @@ class WalletAccounting:
     reconciliation_delta: Decimal | None = None
 
 
-async def compute_wallet_accounting(
-    session: AsyncSession,
+def _assemble_wallet_accounting(
     wallet: Wallet,
+    rows: list[tuple[Trade, Market, Settlement | None]],
 ) -> WalletAccounting:
-    """Assemble one wallet's accounting from ingested trades + settlements."""
-    rows = (
-        await session.execute(
-            select(Trade, Market, Settlement)
-            .join(Market, Trade.market_id == Market.id)
-            .outerjoin(
-                Settlement,
-                (Settlement.market_id == Market.id),
-            )
-            .where(Trade.wallet_id == wallet.id)
-        )
-    ).all()
-
+    """Apply the canonical per-market accounting to already-selected rows."""
     legs_by_market: dict[str, list[pnl.TradeLeg]] = {}
     winners: dict[str, str | None] = {}
     for trade, market, settlement in rows:
@@ -66,8 +55,6 @@ async def compute_wallet_accounting(
                 side=trade.side,
                 size=Decimal(str(trade.size)),
                 price=Decimal(str(trade.price)),
-                # USDC fee on the fill (0 today — Data API /trades carries
-                # no fee field — but subtracted the moment it exists).
                 fee=Decimal(str(trade.fee)) if trade.fee is not None else Decimal(0),
             )
         )
@@ -87,6 +74,68 @@ async def compute_wallet_accounting(
         markets=markets,
     )
 
+async def compute_wallet_accounting(
+    session: AsyncSession,
+    wallet: Wallet,
+) -> WalletAccounting:
+    """Assemble one wallet's accounting from ingested trades + settlements."""
+    rows = (
+        await session.execute(
+            select(Trade, Market, Settlement)
+            .join(Market, Trade.market_id == Market.id)
+            .outerjoin(
+                Settlement,
+                (Settlement.market_id == Market.id),
+            )
+            .where(Trade.wallet_id == wallet.id)
+        )
+    ).all()
+
+    return _assemble_wallet_accounting(wallet, rows)
+
+
+async def compute_wallet_accounting_for_decision_window(
+    session: AsyncSession,
+    wallet: Wallet,
+    *,
+    now: datetime,
+    days: int = 90,
+) -> WalletAccounting:
+    """Account markets whose first wallet trade is inside the lookback window.
+
+    Decision time is the wallet's first trade timestamp in a market. A market
+    is included when cutoff <= first_trade_at <= now. Once included, every
+    stored trade leg for that wallet/market is accounted, even if later legs
+    fall outside the window. Unresolved markets contribute no realized P&L.
+    """
+    cutoff = now - timedelta(days=days)
+    market_ids = (
+        await session.execute(
+            select(Trade.market_id)
+            .where(Trade.wallet_id == wallet.id)
+            .group_by(Trade.market_id)
+            .having(
+                func.min(Trade.traded_at) >= cutoff,
+                func.min(Trade.traded_at) <= now,
+            )
+        )
+    ).scalars().all()
+
+    if not market_ids:
+        return _assemble_wallet_accounting(wallet, [])
+
+    rows = (
+        await session.execute(
+            select(Trade, Market, Settlement)
+            .join(Market, Trade.market_id == Market.id)
+            .outerjoin(Settlement, Settlement.market_id == Market.id)
+            .where(
+                Trade.wallet_id == wallet.id,
+                Trade.market_id.in_(market_ids),
+            )
+        )
+    ).all()
+    return _assemble_wallet_accounting(wallet, rows)
 
 async def reconcile_wallet(
     session: AsyncSession,

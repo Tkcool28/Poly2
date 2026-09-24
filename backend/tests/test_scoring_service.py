@@ -22,7 +22,8 @@ from polycopy.models import (
     Wallet,
     WalletScore,
 )
-from polycopy.scoring.service import score_all_wallets, score_wallet
+from polycopy.scoring import score as scoring_math
+from polycopy.scoring.service import build_wallet_stats, score_all_wallets, score_wallet
 
 NOW = datetime(2026, 9, 20, tzinfo=UTC)
 
@@ -368,3 +369,134 @@ async def test_pending_review_to_score_rejected_withdraws_queue():
         entry = (await session.execute(select(ApprovalQueueEntry))).scalar_one()
         assert entry.state == "withdrawn"
     await engine.dispose()
+
+
+
+async def test_90d_review_profitability_does_not_change_lifetime_score_methodology(session):
+    wallet = await _seed_strong_wallet(session)
+
+    # One recent loss belongs in both lifetime and 90-day accounting.
+    await _add_market_with_trades(
+        session,
+        wallet,
+        "recent-loss",
+        winner="Down",
+        decided_at=NOW - timedelta(days=10),
+    )
+    # One old loss changes lifetime PF only; it is outside the 90-day
+    # decision-time review window.
+    await _add_market_with_trades(
+        session,
+        wallet,
+        "old-loss",
+        winner="Down",
+        decided_at=NOW - timedelta(days=120),
+    )
+    await session.commit()
+
+    lifetime_stats = await build_wallet_stats(session, wallet, now=NOW)
+    expected = scoring_math.score_wallet(lifetime_stats, now=NOW)
+    result = await score_wallet(session, wallet, now=NOW)
+
+    score = (
+        await session.execute(
+            select(WalletScore)
+            .where(WalletScore.wallet_id == wallet.id)
+            .order_by(WalletScore.id.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+
+    # Existing lifetime metric and score inputs are untouched:
+    # 16 × +10 winners / two × 10 losses = PF 8.
+    assert score.profit_factor == pytest.approx(8.0)
+    assert result.components == expected.components
+    assert result.composite == expected.composite
+    assert score.composite_score == expected.composite
+
+    # Review-only 90-day metric excludes the old loss:
+    # 16 × +10 winners / one × 10 loss = PF 16.
+    assert score.profit_factor_90d == pytest.approx(16.0)
+    assert score.gross_profit_90d == Decimal("160.000000")
+    assert score.gross_loss_90d == Decimal("10.000000")
+    assert score.realized_pnl_90d == Decimal("150.000000")
+
+
+async def test_90d_profit_factor_preserves_existing_zero_loss_semantics(session):
+    wallet = Wallet(address="0xzeroloss", approval_state="discovered")
+    session.add(wallet)
+    await session.flush()
+
+    # Positive 90-day profit, zero gross loss: existing persisted PF semantics
+    # represent the mathematical infinity as NULL rather than serializing inf.
+    await _add_market_with_trades(
+        session,
+        wallet,
+        "recent-win",
+        decided_at=NOW - timedelta(days=1),
+        n_trades=1,
+    )
+    # Add enough old history for scoring to run without changing the recent
+    # zero-loss condition.
+    for i in range(15):
+        await _add_market_with_trades(
+            session,
+            wallet,
+            f"old-win-{i}",
+            decided_at=NOW - timedelta(days=100 + i),
+        )
+    await session.commit()
+
+    await score_wallet(session, wallet, now=NOW)
+    score = (
+        await session.execute(
+            select(WalletScore)
+            .where(WalletScore.wallet_id == wallet.id)
+            .order_by(WalletScore.id.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+
+    assert score.gross_profit_90d > 0
+    assert score.gross_loss_90d == Decimal("0.000000")
+    assert score.profit_factor_90d is None
+
+
+async def test_90d_no_settled_markets_persists_zero_totals_and_null_pf(session):
+    wallet = Wallet(address="0xnorecentsettled", approval_state="discovered")
+    session.add(wallet)
+    await session.flush()
+
+    # Historical resolved evidence only.
+    for i in range(16):
+        await _add_market_with_trades(
+            session,
+            wallet,
+            f"historic-{i}",
+            decided_at=NOW - timedelta(days=120 + i),
+        )
+    # Recent activity is open/unresolved, so 90-day realized totals remain zero.
+    await _add_market_with_trades(
+        session,
+        wallet,
+        "recent-open",
+        winner=None,
+        decided_at=NOW - timedelta(days=1),
+        n_trades=1,
+    )
+    await session.commit()
+
+    await score_wallet(session, wallet, now=NOW)
+    score = (
+        await session.execute(
+            select(WalletScore)
+            .where(WalletScore.wallet_id == wallet.id)
+            .order_by(WalletScore.id.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+
+    assert score.gross_profit_90d == Decimal("0.000000")
+    assert score.gross_loss_90d == Decimal("0.000000")
+    assert score.realized_pnl_90d == Decimal("0.000000")
+    assert score.profit_factor_90d is None

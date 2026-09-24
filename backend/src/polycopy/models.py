@@ -12,6 +12,7 @@ Design rules baked in here:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     JSON,
@@ -142,7 +143,15 @@ class WalletScore(Base):
     window_days: Mapped[int] = mapped_column(Integer, default=90)
     sharpe_ratio: Mapped[float | None] = mapped_column(Float)
     max_drawdown: Mapped[float | None] = mapped_column(Float)
+    # Lifetime metric retained for V1 scoring compatibility.
     profit_factor: Mapped[float | None] = mapped_column(Float)
+    # Review/display-only profitability snapshot. The 90-day market set uses
+    # decision time (wallet's first trade in each market); complete accounting
+    # for an included market is retained even when later legs fall outside.
+    profit_factor_90d: Mapped[float | None] = mapped_column(Float)
+    gross_profit_90d: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    gross_loss_90d: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
+    realized_pnl_90d: Mapped[Decimal | None] = mapped_column(Numeric(24, 6))
     kelly_fraction: Mapped[float | None] = mapped_column(Float)
     composite_score: Mapped[float | None] = mapped_column(Float)  # 0-100
     behavioral_tags: Mapped[list | None] = mapped_column(JSON)
