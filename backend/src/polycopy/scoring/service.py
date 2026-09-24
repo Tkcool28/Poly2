@@ -28,7 +28,10 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from polycopy.accounting.service import compute_wallet_accounting
+from polycopy.accounting.service import (
+    compute_wallet_accounting,
+    compute_wallet_accounting_for_decision_window,
+)
 from polycopy.logging_config import get_logger
 from polycopy.models import (
     ApprovalQueueEntry,
@@ -162,17 +165,39 @@ async def score_wallet(
     stats = await build_wallet_stats(session, wallet, now=now)
     result = sc.score_wallet(stats, now=now)
 
+    # Lifetime profit factor is intentionally retained for the existing V1
+    # score methodology. The separate 90-day snapshot below is review/display
+    # evidence only and must not feed gates, components, or the composite.
     pf = None
     if stats.gross_loss > 0:
         pf = float(stats.gross_profit / stats.gross_loss)
     elif stats.gross_profit > 0:
         pf = float("inf")
 
+    recent_acct = await compute_wallet_accounting_for_decision_window(
+        session, wallet, now=now, days=90
+    )
+    recent = recent_acct.summary
+    gross_profit_90d = Decimal(str(recent["gross_profit"]))
+    gross_loss_90d = Decimal(str(recent["gross_loss"]))
+    realized_pnl_90d = Decimal(str(recent["realized_pnl"]))
+    pf_90d = None
+    if gross_loss_90d > 0:
+        pf_90d = float(gross_profit_90d / gross_loss_90d)
+    elif gross_profit_90d > 0:
+        pf_90d = float("inf")
+
     session.add(
         WalletScore(
             wallet_id=wallet.id,
             window_days=90,
             profit_factor=pf if pf is not None and pf != float("inf") else None,
+            profit_factor_90d=(
+                pf_90d if pf_90d is not None and pf_90d != float("inf") else None
+            ),
+            gross_profit_90d=gross_profit_90d,
+            gross_loss_90d=gross_loss_90d,
+            realized_pnl_90d=realized_pnl_90d,
             composite_score=result.composite,
             behavioral_tags=[
                 {
