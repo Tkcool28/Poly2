@@ -86,9 +86,22 @@ class Market(Base):
     closed: Mapped[bool] = mapped_column(Boolean, default=False)
     resolved_outcome: Mapped[str | None] = mapped_column(String(40))
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Persisted Gamma lookup schedule; NULL next-check means immediately due.
+    settlement_last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    settlement_next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    settlement_attempt_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     trades: Mapped[list[Trade]] = relationship(back_populates="market")
+
+
+class ApiThrottle(Base):
+    """Cross-process request-family cooldown after an upstream rate limit."""
+
+    __tablename__ = "api_throttles"
+
+    family: Mapped[str] = mapped_column(String(40), primary_key=True)
+    next_allowed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class Trade(Base):

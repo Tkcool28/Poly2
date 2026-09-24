@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ os.environ.setdefault("POLYCOPY_ENVIRONMENT", "test")
 
 from polycopy.accounting.settlements import detect_winning_outcome, refresh_settlements
 from polycopy.ingestion.client import PolymarketClient
-from polycopy.models import Base, Market, Settlement, Trade, Wallet
+from polycopy.models import ApiThrottle, Base, Market, Settlement, Trade, Wallet
 
 # --- Pure detection logic -------------------------------------------------
 
@@ -209,6 +210,57 @@ async def test_refresh_is_idempotent(session):
     stats = await refresh_settlements(session, client)
 
     assert stats["checked"] == 0
+    assert (await session.scalar(select(func.count(Settlement.id)))) == 1
+
+
+async def test_unresolved_market_has_persisted_due_time_and_backoff(session):
+    market = await _add_market(session, "0xopen")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json=[_gamma("0xopen", closed=False)])
+
+    client = PolymarketClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    t0 = datetime(2026, 9, 24, tzinfo=UTC)
+    assert (await refresh_settlements(session, client, now=t0))["checked"] == 1
+    assert market.settlement_attempt_count == 1
+    assert market.settlement_next_check_at.replace(tzinfo=UTC) == t0 + timedelta(seconds=60)
+    assert (await refresh_settlements(session, client, now=t0 + timedelta(seconds=30)))["checked"] == 0
+    assert calls == 1
+    assert (await refresh_settlements(session, client, now=t0 + timedelta(seconds=60)))["checked"] == 1
+    assert market.settlement_attempt_count == 2
+    assert market.settlement_next_check_at.replace(tzinfo=UTC) == t0 + timedelta(seconds=180)
+    assert calls == 2
+
+
+async def test_gamma_429_cools_request_family_and_recovers_without_false_settlement(session):
+    market = await _add_market(session, "0xrate")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "120"})
+        return httpx.Response(200, json=[_gamma("0xrate")])
+
+    client = PolymarketClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    t0 = datetime(2026, 9, 24, tzinfo=UTC)
+    stats = await refresh_settlements(session, client, now=t0)
+    assert stats["errors"] == 1
+    assert calls == 1
+    assert market.settlement_next_check_at.replace(tzinfo=UTC) == t0 + timedelta(seconds=120)
+    assert (await refresh_settlements(session, client, now=t0 + timedelta(seconds=30)))["checked"] == 0
+    assert (await session.get(ApiThrottle, "gamma")).next_allowed_at.replace(tzinfo=UTC) == t0 + timedelta(seconds=120)
+    new_client = PolymarketClient(http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    assert (await refresh_settlements(session, new_client, now=t0 + timedelta(seconds=60)))["checked"] == 0
+    assert calls == 1
+    client._gamma_backoff_until = 0  # simulated expiry of shared client cooldown
+    stats = await refresh_settlements(session, client, now=t0 + timedelta(seconds=120))
+    assert stats["settled"] == 1
+    assert calls == 2
     assert (await session.scalar(select(func.count(Settlement.id)))) == 1
 
 

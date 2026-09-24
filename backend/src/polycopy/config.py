@@ -91,6 +91,8 @@ class Settings(BaseSettings):
     bootstrap_max_requests: int = 240
     bootstrap_pages_per_run: int = 25
     bootstrap_max_settlement_markets: int = 20
+    settlement_max_checks_per_cycle: int = 10
+    candidate_scoring_interval_seconds: int = 3600
 
     @field_validator("environment")
     @classmethod

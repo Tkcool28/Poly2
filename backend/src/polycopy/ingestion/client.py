@@ -27,6 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any, Self
 
 import httpx
@@ -44,6 +47,23 @@ _BACKOFF_BASE_SECONDS = 0.5
 
 class PolymarketAPIError(Exception):
     """Raised when an endpoint fails after all retries."""
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(header: str | None) -> float:
+    if header:
+        try:
+            return min(300.0, max(1.0, float(header)))
+        except ValueError:
+            try:
+                dt = parsedate_to_datetime(header)
+                return min(300.0, max(1.0, (dt - datetime.now(UTC)).total_seconds()))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 60.0
 
 
 class PolymarketClient:
@@ -65,6 +85,7 @@ class PolymarketClient:
         self._semaphore = asyncio.Semaphore(self._max_concurrent)
         self._client = http_client or httpx.AsyncClient(timeout=timeout_seconds)
         self._owns_client = http_client is None
+        self._gamma_backoff_until = 0.0
         self._logger = get_logger("polycopy.ingestion.client")
 
     async def aclose(self) -> None:
@@ -83,8 +104,14 @@ class PolymarketClient:
 
     async def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
         """GET with concurrency cap + bounded retry/backoff. Fail-closed."""
+        gamma_request = url.startswith(GAMMA_API_BASE)
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES):
+            if gamma_request and time.monotonic() < self._gamma_backoff_until:
+                raise PolymarketAPIError(
+                    "Gamma cooldown active",
+                    retry_after=self._gamma_backoff_until - time.monotonic(),
+                )
             async with self._semaphore:
                 try:
                     resp = await self._client.get(url, params=params)
@@ -96,6 +123,13 @@ class PolymarketClient:
                 else:
                     if resp.status_code == 200:
                         return resp.json()
+                    if gamma_request and resp.status_code == 429:
+                        delay = _retry_after_seconds(resp.headers.get("retry-after"))
+                        self._gamma_backoff_until = time.monotonic() + delay
+                        self._logger.warning("gamma_rate_limited", retry_after_seconds=delay)
+                        raise PolymarketAPIError(
+                            f"{url} returned 429", retry_after=delay
+                        )
                     if resp.status_code in (429, 500, 502, 503, 504):
                         last_error = PolymarketAPIError(
                             f"{url} returned {resp.status_code}"
