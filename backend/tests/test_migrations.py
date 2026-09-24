@@ -109,6 +109,19 @@ async def _verify(db_url: str) -> None:
         }
         assert "uq_positions_wallet_market_outcome" in constraints
         assert "fk_positions_wallet_id_wallets" in constraints
+        score_cols = {
+            r["column_name"]
+            for r in await conn.fetch(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='wallet_scores'"
+            )
+        }
+        assert {
+            "profit_factor_90d",
+            "gross_profit_90d",
+            "gross_loss_90d",
+            "realized_pnl_90d",
+        } <= score_cols
     finally:
         await conn.close()
 
@@ -182,4 +195,50 @@ def test_canonical_identity_migration_downgrade_upgrade_round_trip(
         "text",
         None,
     )
+    get_settings.cache_clear()
+
+
+
+async def _column_info(db_url: str, table: str, column: str):
+    conn = await asyncpg.connect(_dsn(db_url))
+    try:
+        return await conn.fetchrow(
+            "SELECT data_type, numeric_precision, numeric_scale "
+            "FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name=$1 AND column_name=$2",
+            table,
+            column,
+        )
+    finally:
+        await conn.close()
+
+
+def test_90d_profitability_migration_round_trip(monkeypatch: pytest.MonkeyPatch):
+    db_url = os.environ.get("POLYCOPY_TEST_POSTGRES_URL")
+    if not db_url:
+        pytest.skip("requires POLYCOPY_TEST_POSTGRES_URL")
+
+    cfg = _cfg(db_url, monkeypatch)
+    command.downgrade(cfg, "0006")
+
+    for column in (
+        "profit_factor_90d",
+        "gross_profit_90d",
+        "gross_loss_90d",
+        "realized_pnl_90d",
+    ):
+        assert asyncio.run(_column_info(db_url, "wallet_scores", column)) is None
+
+    command.upgrade(cfg, "head")
+
+    pf = asyncio.run(_column_info(db_url, "wallet_scores", "profit_factor_90d"))
+    assert pf is not None and pf["data_type"] == "double precision"
+
+    for column in ("gross_profit_90d", "gross_loss_90d", "realized_pnl_90d"):
+        info = asyncio.run(_column_info(db_url, "wallet_scores", column))
+        assert info is not None
+        assert info["data_type"] == "numeric"
+        assert info["numeric_precision"] == 24
+        assert info["numeric_scale"] == 6
+
     get_settings.cache_clear()
