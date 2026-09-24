@@ -153,7 +153,7 @@ async def _add_window_market(
     if winning_outcome is not None:
         session.add(Settlement(market_id=market.id, winning_outcome=winning_outcome))
     trade_legs = legs or [
-        ("BUY", "Up", Decimal("10"), Decimal("0.50"), first_trade_at)
+        ("BUY", "Up", Decimal(10), Decimal("0.50"), first_trade_at)
     ]
     for i, (side, outcome, size, price, traded_at) in enumerate(trade_legs):
         session.add(
@@ -187,8 +187,8 @@ async def test_decision_window_excludes_old_market_even_with_recent_leg(session)
         "old-crossing",
         first_trade_at=cutoff - timedelta(seconds=1),
         legs=[
-            ("BUY", "Up", Decimal("10"), Decimal("0.50"), cutoff - timedelta(seconds=1)),
-            ("BUY", "Up", Decimal("10"), Decimal("0.50"), cutoff + timedelta(days=10)),
+            ("BUY", "Up", Decimal(10), Decimal("0.50"), cutoff - timedelta(seconds=1)),
+            ("BUY", "Up", Decimal(10), Decimal("0.50"), cutoff + timedelta(days=10)),
         ],
     )
     await session.commit()
@@ -202,7 +202,7 @@ async def test_decision_window_excludes_old_market_even_with_recent_leg(session)
     assert lifetime.summary["realized_pnl"] == Decimal("10.00")
     assert recent.summary["settled_market_count"] == 0
     assert recent.summary["trade_count"] == 0
-    assert recent.summary["realized_pnl"] == Decimal("0")
+    assert recent.summary["realized_pnl"] == Decimal(0)
 
 
 async def test_decision_window_cutoff_is_inclusive_and_keeps_complete_market(session):
@@ -218,10 +218,10 @@ async def test_decision_window_cutoff_is_inclusive_and_keeps_complete_market(ses
         "boundary",
         first_trade_at=cutoff,
         legs=[
-            ("BUY", "Up", Decimal("10"), Decimal("0.50"), cutoff),
+            ("BUY", "Up", Decimal(10), Decimal("0.50"), cutoff),
             # Complete-market accounting is retained after selection. This
             # deliberately proves there is no per-leg window predicate.
-            ("SELL", "Up", Decimal("2"), Decimal("0.75"), now + timedelta(seconds=1)),
+            ("SELL", "Up", Decimal(2), Decimal("0.75"), now + timedelta(seconds=1)),
         ],
     )
     await session.commit()
@@ -235,7 +235,7 @@ async def test_decision_window_cutoff_is_inclusive_and_keeps_complete_market(ses
     # -5 + 1.50 cash, 8 winning shares pay $8 => +4.50
     assert recent.summary["realized_pnl"] == Decimal("4.50")
     assert recent.summary["gross_profit"] == Decimal("4.50")
-    assert recent.summary["gross_loss"] == Decimal("0")
+    assert recent.summary["gross_loss"] == Decimal(0)
 
 
 async def test_decision_window_open_markets_do_not_create_realized_pnl(session):
@@ -258,9 +258,9 @@ async def test_decision_window_open_markets_do_not_create_realized_pnl(session):
 
     assert recent.summary["settled_market_count"] == 0
     assert recent.summary["open_market_count"] == 1
-    assert recent.summary["gross_profit"] == Decimal("0")
-    assert recent.summary["gross_loss"] == Decimal("0")
-    assert recent.summary["realized_pnl"] == Decimal("0")
+    assert recent.summary["gross_profit"] == Decimal(0)
+    assert recent.summary["gross_loss"] == Decimal(0)
+    assert recent.summary["realized_pnl"] == Decimal(0)
 
 
 async def test_decision_window_repeated_reads_are_deterministic(session):
