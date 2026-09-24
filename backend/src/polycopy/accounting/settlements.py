@@ -19,10 +19,11 @@ One Settlement per market remains enforced by ``uq_settlements_market``.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.ingestion.client import (
@@ -31,7 +32,7 @@ from polycopy.ingestion.client import (
     clob_token_map,
 )
 from polycopy.logging_config import get_logger
-from polycopy.models import Market, Settlement, Trade
+from polycopy.models import ApiThrottle, Market, Settlement, Trade
 
 logger = get_logger("polycopy.accounting.settlements")
 
@@ -148,6 +149,14 @@ def _backfill_market_metadata(market: Market, gamma: dict[str, Any]) -> bool:
     return changed
 
 
+async def gamma_backoff_active(session: AsyncSession, now: datetime) -> bool:
+    throttle = await session.get(ApiThrottle, "gamma")
+    if throttle is None:
+        return False
+    due = throttle.next_allowed_at
+    return (due if due.tzinfo else due.replace(tzinfo=UTC)) > now
+
+
 async def refresh_settlements(
     session: AsyncSession,
     client: PolymarketClient,
@@ -155,6 +164,7 @@ async def refresh_settlements(
     wallet_id: int | None = None,
     max_markets: int | None = None,
     condition_ids: list[str] | None = None,
+    now: datetime | None = None,
 ) -> dict[str, int]:
     """Check tracked markets without Settlement rows for resolution.
 
@@ -166,8 +176,13 @@ async def refresh_settlements(
     Markets are checked sequentially and each persisted metadata/settlement
     update is committed independently.
     """
+    now = now or datetime.now(UTC)
     settled_market_ids = select(Settlement.market_id)
-    stmt = select(Market).where(Market.id.not_in(settled_market_ids))
+    stmt = select(Market).where(
+        Market.id.not_in(settled_market_ids),
+        or_(Market.settlement_next_check_at.is_(None),
+            Market.settlement_next_check_at <= now),
+    )
     if condition_ids is not None:
         if not condition_ids:
             return {
@@ -180,10 +195,10 @@ async def refresh_settlements(
         stmt = stmt.join(Trade, Trade.market_id == Market.id).where(
             Trade.wallet_id == wallet_id
         ).group_by(Market.id).order_by(func.min(Trade.traded_at))
+    if wallet_id is None:
+        stmt = stmt.order_by(Market.settlement_next_check_at, Market.id)
     if max_markets is not None:
         stmt = stmt.limit(max_markets)
-    markets = (await session.execute(stmt)).scalars().unique().all()
-
     stats = {
         "checked": 0,
         "settled": 0,
@@ -193,19 +208,44 @@ async def refresh_settlements(
         "metadata_backfilled": 0,
         "errors": 0,
     }
+    if await gamma_backoff_active(session, now):
+        return stats
+    throttle = await session.get(ApiThrottle, "gamma")
+    markets = (await session.execute(stmt)).scalars().unique().all()
     for market in markets:
         stats["checked"] += 1
+        market.settlement_last_checked_at = now
+        market.settlement_attempt_count = (market.settlement_attempt_count or 0) + 1
+        delay = min(12 * 3600, 60 * (2 ** min(market.settlement_attempt_count - 1, 10)))
+        market.settlement_next_check_at = now + timedelta(seconds=delay)
         try:
             gamma, used_token_fallback = await _lookup_closed_gamma_market(
                 session, client, market
             )
         except (PolymarketAPIError, ValueError) as exc:
             stats["errors"] += 1
+            retry_after = getattr(exc, "retry_after", None)
+            if retry_after is not None:
+                market.settlement_next_check_at = now + timedelta(seconds=max(delay, retry_after))
+                if throttle is None:
+                    throttle = ApiThrottle(family="gamma", next_allowed_at=now)
+                    session.add(throttle)
+                throttle.next_allowed_at = max(
+                    throttle.next_allowed_at.replace(tzinfo=UTC)
+                    if throttle.next_allowed_at.tzinfo is None
+                    else throttle.next_allowed_at,
+                    now + timedelta(seconds=retry_after),
+                )
+            await session.commit()
             logger.warning(
                 "settlement_check_failed",
                 condition_id=market.condition_id,
                 error=str(exc),
             )
+            if retry_after is not None:
+                # One 429 cools down this entire request family in the shared
+                # bot client; avoid hammering subsequent markets this cycle.
+                break
             continue
 
         if gamma is None:
@@ -214,6 +254,7 @@ async def refresh_settlements(
                 "settlement_market_not_found_or_open",
                 condition_id=market.condition_id,
             )
+            await session.commit()
             continue
 
         if used_token_fallback:
@@ -233,12 +274,12 @@ async def refresh_settlements(
                     outcomes=gamma.get("outcomes"),
                     outcomePrices=gamma.get("outcomePrices"),
                 )
-            if metadata_changed:
-                await session.commit()
+            await session.commit()
             continue
 
         market.closed = True
         market.resolved_outcome = winner
+        market.settlement_next_check_at = None
         session.add(Settlement(market_id=market.id, winning_outcome=winner))
         await session.commit()
         stats["settled"] += 1

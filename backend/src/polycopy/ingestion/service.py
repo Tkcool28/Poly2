@@ -26,10 +26,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from polycopy.accounting.settlements import refresh_settlements
+from polycopy.accounting.settlements import gamma_backoff_active, refresh_settlements
 from polycopy.config import get_settings
 from polycopy.failure_throttle import FailureLogThrottle
 from polycopy.ingestion.client import (
@@ -308,6 +308,8 @@ async def bootstrap_wallet_history(
         remaining_settlement_markets = max(
             0, settings.bootstrap_max_settlement_markets - len(settlement_checked)
         )
+        if await gamma_backoff_active(session, now):
+            remaining_settlement_markets = 0
         # A satisfied settlement gate needs no further Gamma calls; older
         # trade pages may still be required solely to establish account age.
         current_settled = int(await session.scalar(
@@ -320,6 +322,8 @@ async def bootstrap_wallet_history(
             .join(Trade, Trade.market_id == Market.id)
             .where(Trade.wallet_id == wallet.id)
             .where(Market.id.not_in(select(Settlement.market_id)))
+            .where(or_(Market.settlement_next_check_at.is_(None),
+                       Market.settlement_next_check_at <= now))
             .where(Market.condition_id.not_in(settlement_checked))
             .group_by(Market.id, Market.condition_id)
             .order_by(func.min(Trade.traded_at))
@@ -353,7 +357,8 @@ async def bootstrap_wallet_history(
                     errors=settlement_result["errors"],
                 )
                 break
-            settlement_checked.extend(market_rows)
+            if settlement_result["checked"] == len(market_rows):
+                settlement_checked.extend(market_rows)
 
         local_count, settled_count, db_oldest, db_newest = await evidence()
         oldest = min(_aware_utc(oldest), _aware_utc(db_oldest)) if oldest and db_oldest else (db_oldest or oldest)

@@ -42,6 +42,8 @@ cycle until that canonical trade reappears. The offset, timestamp window, and
 incomplete state survive restarts in the decision log. A lost upstream window
 remains visibly incomplete; a full newest page never proves continuity.
 
+The bot owns candidate rescoring on an independent 3,600-second cadence; the
+operator scoring endpoint remains available. Neither path can approve a wallet.
 Before a scoring pass, discovered candidates use a separate historical
 bootstrap (100 trades per page; 25 pages per run; cumulative caps of 200 pages,
 20,000 fetched rows, 240 logical requests, and 20 Gamma market checks). It
@@ -57,6 +59,12 @@ history ends, or a cumulative bound is reached. A per-run page cap records
 `in_progress` and delays scoring until a subsequent pass finishes. The
 `/wallets/{id}/bootstrap` endpoint exposes termination and evidence. This
 bounded pass does not claim complete wallet history.
+
+Unresolved markets have persisted next-check times (one-minute initial retry,
+exponential backoff capped at 12 hours). The bot checks at most ten due markets
+per cycle; resolved markets are excluded permanently. Gamma 429 responses honor
+bounded `Retry-After` cooldowns, persisted across bot and API workers for the
+Gamma settlement family. A cooldown never counts as settlement evidence.
 
 Gate failures split into two kinds (review correction, 2026-09-20):
 
