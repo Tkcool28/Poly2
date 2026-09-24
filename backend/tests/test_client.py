@@ -34,7 +34,7 @@ async def test_get_trades_hits_data_api():
 
 
 async def test_gamma_market_parses_json_encoded_strings():
-    """Probe-verified: Gamma returns clobTokenIds/outcomes as JSON strings."""
+    """Gamma returns clobTokenIds/outcomes as JSON strings."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "gamma-api.polymarket.com"
@@ -42,6 +42,7 @@ async def test_gamma_market_parses_json_encoded_strings():
             200,
             json=[
                 {
+                    "conditionId": "0xcond",
                     "question": "Will it rain?",
                     "slug": "will-it-rain",
                     "clobTokenIds": '["4667", "8761"]',
@@ -57,9 +58,112 @@ async def test_gamma_market_parses_json_encoded_strings():
     assert clob_token_map(market) == {"Up": "4667", "Down": "8761"}
 
 
+async def test_gamma_closed_lookup_sends_explicit_closed_filter():
+    seen_params = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_params.update(dict(request.url.params))
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "conditionId": "0xhist",
+                    "closed": True,
+                    "clobTokenIds": '["1", "2"]',
+                    "outcomes": '["Yes", "No"]',
+                    "outcomePrices": '["1", "0"]',
+                }
+            ],
+        )
+
+    async with _client(handler) as client:
+        market = await client.get_gamma_market("0xhist", closed=True)
+
+    assert seen_params["condition_ids"] == "0xhist"
+    assert seen_params["closed"] == "true"
+    assert market is not None
+    assert market["outcomePrices"] == ["1", "0"]
+
+
+async def test_gamma_market_requires_exact_condition_identity():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "conditionId": "0xwrong",
+                    "clobTokenIds": '["11", "12"]',
+                    "outcomes": '["Yes", "No"]',
+                },
+                {
+                    "conditionId": "0xright",
+                    "clobTokenIds": '["21", "22"]',
+                    "outcomes": '["Up", "Down"]',
+                },
+            ],
+        )
+
+    async with _client(handler) as client:
+        market = await client.get_gamma_market("0xright")
+
+    assert market is not None
+    assert market["conditionId"] == "0xright"
+    assert market["clobTokenIds"] == ["21", "22"]
+
+
+async def test_gamma_market_none_when_filter_returns_only_wrong_identity():
+    async with _client(
+        lambda r: httpx.Response(
+            200,
+            json=[
+                {
+                    "conditionId": "0xother",
+                    "clobTokenIds": '["1", "2"]',
+                    "outcomes": '["Yes", "No"]',
+                }
+            ],
+        )
+    ) as client:
+        assert await client.get_gamma_market("0xmissing") is None
+
+
 async def test_gamma_market_none_when_empty():
     async with _client(lambda r: httpx.Response(200, json=[])) as client:
         assert await client.get_gamma_market("0xmissing") is None
+
+
+async def test_gamma_token_fallback_requires_token_and_condition_match():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["clob_token_ids"] == "777"
+        assert request.url.params["closed"] == "true"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "conditionId": "0xwrong",
+                    "clobTokenIds": '["777", "778"]',
+                    "outcomes": '["Yes", "No"]',
+                },
+                {
+                    "conditionId": "0xright",
+                    "clobTokenIds": '["777", "999"]',
+                    "outcomes": '["Up", "Down"]',
+                    "closed": True,
+                    "outcomePrices": '["1", "0"]',
+                },
+            ],
+        )
+
+    async with _client(handler) as client:
+        market = await client.get_gamma_market_by_token(
+            "777",
+            expected_condition_id="0xright",
+            closed=True,
+        )
+
+    assert market is not None
+    assert market["conditionId"] == "0xright"
+    assert market["clobTokenIds"] == ["777", "999"]
 
 
 async def test_retries_on_429_then_succeeds(monkeypatch):
