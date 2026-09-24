@@ -290,6 +290,9 @@ async def bootstrap_wallet_history(
         # market consumes at most two logical API requests (exact Gamma then
         # identity-checked token fallback); the hard total request budget is
         # enforced before advancing again.
+        remaining_settlement_markets = max(
+            0, settings.bootstrap_max_settlement_markets - len(settlement_checked)
+        )
         market_rows = (await session.execute(
             select(Market.condition_id)
             .join(Trade, Trade.market_id == Market.id)
@@ -298,7 +301,7 @@ async def bootstrap_wallet_history(
             .where(Market.condition_id.not_in(settlement_checked))
             .group_by(Market.id, Market.condition_id)
             .order_by(func.min(Trade.traded_at))
-            .limit(min(settings.bootstrap_max_settlement_markets, max(0, (max_requests - requests) // 2)))
+            .limit(min(remaining_settlement_markets, max(0, (max_requests - requests) // 2)))
         )).scalars().all()
         if market_rows:
             # Count worst-case exact lookup plus validated token fallback per

@@ -230,6 +230,57 @@ async def test_overlapping_api_page_rows_are_canonically_deduplicated(session, b
     assert await session.scalar(select(func.count(Trade.id))) == 15
 
 
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_settlement_market_limit_is_cumulative_across_pages_and_resume(
+    session, bootstrap_settings, interrupted
+):
+    wallet = await _wallet(session)
+    bootstrap_settings.bootstrap_page_size = 10
+    bootstrap_settings.bootstrap_max_pages = 6
+    rows = trades(50)  # 25 distinct markets; none provides settlement evidence.
+
+    class UnresolvedClient(PagedClient):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.checked: list[str] = []
+
+        async def get_gamma_market(self, condition_id, *, closed=None):
+            self.checked.append(condition_id)
+
+    class InterruptedClient(UnresolvedClient):
+        async def get_trades(self, wallet, *, limit, offset=0, start=None, end=None):
+            if offset == 20:
+                raise PolymarketAPIError("temporary outage")
+            return await super().get_trades(
+                wallet, limit=limit, offset=offset, start=start, end=end
+            )
+
+    checked: list[str] = []
+    if interrupted:
+        first_client = InterruptedClient(rows)
+        first = await bootstrap_wallet_history(session, first_client, wallet, now=NOW)
+        assert first["termination_reason"] == "upstream_error"
+        assert first["next_offset"] == 20
+        assert len(first["settlement_checked"]) == 10
+        checked.extend(first_client.checked)
+
+    client = UnresolvedClient(rows)
+    result = await bootstrap_wallet_history(session, client, wallet, now=NOW)
+    checked.extend(client.checked)
+
+    assert result["maturity_satisfied"] is False
+    assert result["total_local_trade_count"] == 50
+    assert result["settled_market_count"] == 0
+    assert len(result["settlement_checked"]) == 20
+    assert len(checked) == len(set(checked)) == 20
+    assert result["requests_used"] <= bootstrap_settings.bootstrap_max_requests
+
+    # The persisted cap still applies to another scoring pass.
+    repeated = UnresolvedClient(rows)
+    await bootstrap_wallet_history(session, repeated, wallet, now=NOW)
+    assert repeated.checked == []
+
+
 async def test_regular_live_tail_remains_one_bounded_request(session):
     wallet = await _wallet(session)
     source = PagedClient(trades())
