@@ -217,9 +217,10 @@ async def execute_signal(
     """Simulate filling one signal against the detection-time book.
 
     Returns the PaperOrder, or None when the signal was DEFERRED (review
-    delay not elapsed, or kill switch on) — deferred signals stay
-    ``pending``: no PaperOrder, no CLOB book request, and they become
-    eligible normally once the gate clears (docs/safety.md).
+    delay not elapsed, or kill switch on) — fresh deferred signals stay
+    ``pending`` with no book request. Signals older than the configured
+    source-to-decision age become recorded stale misses even with the kill
+    switch on; no book or fill is created for them.
     """
     _assert_paper_mode()
     settings = get_settings()
@@ -227,9 +228,18 @@ async def execute_signal(
     size_usd = Decimal(str(settings.max_order_size_usd))
     fee_rate = Decimal(str(settings.paper_fee_rate))
 
-    # --- Deferral gates (no order, no book request, stays pending) -------
+    # Source time is the only honest age boundary for copyability; t1 may
+    # already be delayed by source outages or process restarts. An expired
+    # signal is a missed paper opportunity, never an executable backlog.
+    if (now - _aware(signal.t0_traded_at)).total_seconds() > settings.max_signal_execution_age_seconds:
+        order = await _record_skip(session, signal, reason="stale_signal", now=now,
+                                   order_kwargs={})
+        await session.commit()
+        return order
+
+    # --- Deferral gates (no executable order or book request) ------------
     if settings.order_kill_switch:
-        logger.info("signal_deferred", signal_id=signal.id, reason="kill_switch")
+        signal.kill_switch_deferrals = (signal.kill_switch_deferrals or 0) + 1
         return None
     if now < _eligible_at(signal):
         logger.info("signal_deferred", signal_id=signal.id, reason="review_delay")
@@ -552,4 +562,8 @@ async def run_execution_cycle(
             stats["deferred"] += 1
         else:
             stats[order.status] = stats.get(order.status, 0) + 1
+            if order.miss_reason == "stale_signal":
+                stats["stale"] = stats.get("stale", 0) + 1
+    if stats["deferred"]:
+        await session.commit()  # one durable count write per bounded batch
     return stats

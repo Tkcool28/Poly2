@@ -47,6 +47,10 @@ BOOK = {
 @pytest.fixture(autouse=True)
 def _fresh_settings(monkeypatch):
     monkeypatch.setenv("POLYCOPY_ORDER_KILL_SWITCH", "false")
+    # Existing execution scenarios use fixed 2026-09-20 times; isolate their
+    # book/accounting assertions from the new freshness gate. Freshness tests
+    # below explicitly use the production default of five minutes.
+    monkeypatch.setenv("POLYCOPY_MAX_SIGNAL_EXECUTION_AGE_SECONDS", "10000000")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -273,6 +277,50 @@ async def test_kill_switch_defers_without_order_or_book_request(session, monkeyp
         order = await execute_signal(session, client, signal)
     assert order.status == "filled"
     assert signal.status == "executed"
+
+
+async def test_kill_switch_backlog_expires_as_stale_miss_without_book(session, monkeypatch):
+    monkeypatch.setenv("POLYCOPY_ORDER_KILL_SWITCH", "true")
+    monkeypatch.setenv("POLYCOPY_MAX_SIGNAL_EXECUTION_AGE_SECONDS", "300")
+    get_settings.cache_clear()
+    await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    book_requests = 0
+
+    def book(request: httpx.Request) -> httpx.Response:
+        nonlocal book_requests
+        book_requests += 1
+        return httpx.Response(200, json=BOOK)
+
+    async with PolymarketClient(http_client=httpx.AsyncClient(
+        transport=httpx.MockTransport(book)
+    )) as client:
+        assert await execute_signal(session, client, signal, now=NOW + timedelta(minutes=1)) is None
+        await session.commit()
+        assert signal.kill_switch_deferrals == 1
+        stale = await execute_signal(session, client, signal, now=NOW + timedelta(minutes=6))
+        assert stale.status == "missed"
+        assert stale.miss_reason == "stale_signal"
+        assert stale.book_snapshot is None
+        assert book_requests == 0
+        assert signal.status == "skipped"
+
+        # Enabling paper execution later cannot release the old backlog.
+        monkeypatch.setenv("POLYCOPY_ORDER_KILL_SWITCH", "false")
+        get_settings.cache_clear()
+        await _seed_approved_trade(
+            session, address="0xfresh", traded_at=NOW + timedelta(minutes=10),
+            ingested_at=NOW + timedelta(minutes=10),
+        )
+        await detect_signals(session, now=NOW + timedelta(minutes=10))
+        fresh = (await session.execute(select(Signal).where(Signal.status == "pending"))).scalar_one()
+        filled = await execute_signal(
+            session, client, fresh, now=NOW + timedelta(minutes=10, seconds=31),
+        )
+    assert filled.status == "filled"
+    assert book_requests == 1
+    assert await session.scalar(select(func.count(PaperOrder.id))) == 2
 
 
 async def test_no_signals_from_pre_approval_trades(session):
