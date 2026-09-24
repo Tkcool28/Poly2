@@ -77,18 +77,19 @@ class Settings(BaseSettings):
     max_copy_price: float = 0.90
 
     # --- Ingestion bounds (Chunk 2; defined now so nobody forgets) -------
-    # Most-recent-N per wallet per cycle: a live TAIL, not a full history
-    # backfill. Scores computed from ingested trades may undercount
-    # deep-history wallets (e.g. maturity gates in docs/wallet-intelligence).
+    # One newest page per wallet per cycle; approved wallets have a separate,
+    # persisted, per-cycle bounded continuity recovery when the anchor is lost.
     ingestion_batch_size: int = 500
     ingestion_max_concurrent_requests: int = 4
     ingestion_poll_interval_seconds: float = 15.0
+    catch_up_pages_per_cycle: int = 3
     # Candidate-only history bootstrap. These cumulative bounds are separate
     # from the recurring live-tail batch above.
     bootstrap_page_size: int = 100
-    bootstrap_max_pages: int = 10
-    bootstrap_max_trades: int = 1000
-    bootstrap_max_requests: int = 50
+    bootstrap_max_pages: int = 200
+    bootstrap_max_trades: int = 20000
+    bootstrap_max_requests: int = 240
+    bootstrap_pages_per_run: int = 25
     bootstrap_max_settlement_markets: int = 20
 
     @field_validator("environment")

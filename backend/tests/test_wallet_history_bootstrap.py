@@ -16,7 +16,7 @@ os.environ.setdefault("POLYCOPY_ENVIRONMENT", "test")
 from polycopy.api.routes import get_wallet_bootstrap
 from polycopy.ingestion.client import PolymarketAPIError, PolymarketClient
 from polycopy.ingestion.service import bootstrap_wallet_history, ingest_wallet_trades
-from polycopy.models import Base, Market, Settlement, Trade, Wallet
+from polycopy.models import Base, DecisionLogEntry, Market, Settlement, Trade, Wallet
 
 NOW = datetime(2026, 9, 24, tzinfo=UTC)
 
@@ -290,3 +290,52 @@ async def test_regular_live_tail_remains_one_bounded_request(session):
     assert len(source.calls) == 1
     assert source.calls[0]["limit"] == 500
     assert source.calls[0]["offset"] == 0
+
+
+async def test_settlement_requests_stop_after_gate_while_age_search_continues(
+    session, bootstrap_settings
+):
+    wallet = await _wallet(session)
+    bootstrap_settings.bootstrap_page_size = 30
+    recent = trades(30)
+    for item in recent:
+        item["timestamp"] = int((NOW - timedelta(days=1)).timestamp()) - int(item["transactionHash"], 16)
+    older = trades(1)
+    older[0]["timestamp"] = int((NOW - timedelta(days=40)).timestamp())
+    older[0]["transactionHash"] = "0x" + "f" * 64
+    source = PagedClient(recent + older)
+    source.checked = []
+    original = source.get_gamma_market
+
+    async def count_checks(condition_id, *, closed=None):
+        source.checked.append(condition_id)
+        return await original(condition_id, closed=closed)
+
+    source.get_gamma_market = count_checks
+    result = await bootstrap_wallet_history(session, source, wallet, now=NOW)
+    assert result["maturity_satisfied"]
+    assert len(source.calls) == 2
+    assert len(source.checked) == 15
+    assert len(result["settlement_checked"]) == 15
+
+
+async def test_offset_ceiling_rolls_into_older_time_window(session, bootstrap_settings):
+    wallet = await _wallet(session)
+    bootstrap_settings.bootstrap_page_size = 100
+    bootstrap_settings.bootstrap_max_pages = 200
+    bootstrap_settings.bootstrap_max_trades = 20000
+    bootstrap_settings.bootstrap_max_requests = 240
+    session.add(DecisionLogEntry(actor="bot", action="wallet_historical_bootstrap", context={
+        "wallet_id": wallet.id, "wallet": wallet.address,
+        "pages_requested": 100, "rows_fetched": 10000,
+        "requests_used": 100, "next_offset": 10000,
+        "end_timestamp": int(NOW.timestamp()),
+        "window_oldest": int((NOW - timedelta(days=12)).timestamp()),
+        "settlement_checked": [], "termination_reason": "in_progress",
+    }))
+    await session.commit()
+    source = PagedClient([])
+    result = await bootstrap_wallet_history(session, source, wallet, now=NOW)
+    assert source.calls[0]["offset"] == 0
+    assert source.calls[0]["end"] == int((NOW - timedelta(days=12)).timestamp())
+    assert result["termination_reason"] == "history_exhausted"
