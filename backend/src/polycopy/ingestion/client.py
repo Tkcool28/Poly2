@@ -7,15 +7,20 @@ One client instance owns:
   defense against the "many calls at once ate the box" failure mode;
 * retry-with-backoff on 429 / 5xx / transport errors (bounded attempts);
 * response parsing for known API quirks, notably Gamma's ``clobTokenIds``
-  and ``outcomes`` fields, which the probe verified are JSON-ENCODED
-  STRINGS (e.g. ``"[\\"4667...\\", \\"8761...\\"]"``), not native arrays.
+  and ``outcomes`` fields, which are JSON-encoded strings.
 
-Endpoints (all verified by the source-identity probe, 2026-09-19):
+Endpoints:
 * Data API ``GET /trades?user=`` — trade history for a wallet
 * Data API ``GET /positions?user=`` — position reconciliation
 * Gamma API ``GET /markets?condition_ids=`` — market metadata + token map
+* Gamma API ``GET /markets?clob_token_ids=`` — token-identity fallback
 * CLOB API ``GET /markets/{condition_id}`` — token map fallback
 * CLOB API ``GET /book?token_id=`` — order book for paper fills (PR-E)
+
+Gamma historical-market note: resolved markets must be requested explicitly
+with ``closed=true`` when doing settlement discovery. Callers that need
+resolution data should pass ``closed=True``; a generic market lookup is not
+assumed to include historical/closed rows.
 """
 
 from __future__ import annotations
@@ -125,8 +130,7 @@ class PolymarketClient:
         )
 
     async def get_positions(self, wallet: str) -> list[dict[str, Any]]:
-        """Current positions for reconciliation (probe-verified fields
-        include realizedPnl, cashPnl, avgPrice, totalBought)."""
+        """Current positions for reconciliation."""
         return await self._get(f"{DATA_API_BASE}/positions", params={"user": wallet})
 
     # --- Gamma API -------------------------------------------------------
@@ -138,18 +142,77 @@ class PolymarketClient:
             return json.loads(value)
         return value
 
-    async def get_gamma_market(self, condition_id: str) -> dict[str, Any] | None:
-        """Market metadata incl. parsed clobTokenIds/outcomes. None if absent."""
-        markets = await self._get(
-            f"{GAMMA_API_BASE}/markets", params={"condition_ids": condition_id}
-        )
-        if not markets:
-            return None
-        market = markets[0]
+    def _parse_gamma_market(self, raw_market: dict[str, Any]) -> dict[str, Any]:
+        """Return a parsed copy of one Gamma market object."""
+        market = dict(raw_market)
         market["clobTokenIds"] = self._parse_json_string(market.get("clobTokenIds"))
         market["outcomes"] = self._parse_json_string(market.get("outcomes"))
         market["outcomePrices"] = self._parse_json_string(market.get("outcomePrices"))
         return market
+
+    @staticmethod
+    def _same_condition(left: Any, right: str) -> bool:
+        return str(left or "").lower() == right.lower()
+
+    async def get_gamma_market(
+        self,
+        condition_id: str,
+        *,
+        closed: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """Fetch one exact Gamma market by condition ID.
+
+        ``closed=True`` is required by settlement callers so historical
+        resolved markets are not hidden by the generic listing behavior.
+
+        The response is identity-checked. We never trust ``markets[0]``
+        unless its ``conditionId`` exactly matches the requested condition.
+        """
+        params: dict[str, Any] = {"condition_ids": condition_id}
+        if closed is not None:
+            params["closed"] = str(closed).lower()
+        markets = await self._get(f"{GAMMA_API_BASE}/markets", params=params)
+        if not isinstance(markets, list):
+            return None
+        for raw_market in markets:
+            if isinstance(raw_market, dict) and self._same_condition(
+                raw_market.get("conditionId"), condition_id
+            ):
+                return self._parse_gamma_market(raw_market)
+        return None
+
+    async def get_gamma_market_by_token(
+        self,
+        token_id: str,
+        *,
+        expected_condition_id: str,
+        closed: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """Fallback lookup by traded token ID, still enforcing condition identity.
+
+        The token must be present in the returned ``clobTokenIds``, and the
+        returned market's condition ID must exactly match
+        ``expected_condition_id``. This prevents a fallback lookup from
+        silently settling the wrong local market.
+        """
+        params: dict[str, Any] = {"clob_token_ids": token_id}
+        if closed is not None:
+            params["closed"] = str(closed).lower()
+        markets = await self._get(f"{GAMMA_API_BASE}/markets", params=params)
+        if not isinstance(markets, list):
+            return None
+        for raw_market in markets:
+            if not isinstance(raw_market, dict):
+                continue
+            if not self._same_condition(
+                raw_market.get("conditionId"), expected_condition_id
+            ):
+                continue
+            market = self._parse_gamma_market(raw_market)
+            token_ids = {str(value) for value in (market.get("clobTokenIds") or [])}
+            if str(token_id) in token_ids:
+                return market
+        return None
 
     async def get_clob_market(self, condition_id: str) -> dict[str, Any]:
         """CLOB market object (token mapping fallback)."""
