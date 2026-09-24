@@ -88,29 +88,73 @@ async def health_deps(
     except Exception as exc:  # noqa: BLE001
         checks["redis"] = f"error: {type(exc).__name__}"
 
+    heartbeat_times: dict[str, str | None] = {
+        "process_seen_at": None,
+        "last_success_at": None,
+        "last_failure_at": None,
+    }
     try:
-        heartbeat = (
+        rows = (
             await db.execute(
                 select(ServiceHeartbeat)
-                .where(ServiceHeartbeat.service == "bot")
-                .order_by(ServiceHeartbeat.seen_at.desc())
-                .limit(1)
+                .where(
+                    ServiceHeartbeat.service.in_(
+                        ["bot_alive", "bot_success", "bot_failure", "bot"]
+                    )
+                )
+                .order_by(ServiceHeartbeat.seen_at.desc(), ServiceHeartbeat.id.desc())
+                .limit(50)
             )
-        ).scalar_one_or_none()
-        if heartbeat is None:
+        ).scalars().all()
+        latest: dict[str, ServiceHeartbeat] = {}
+        for row in rows:
+            latest.setdefault(row.service, row)
+
+        alive = latest.get("bot_alive") or latest.get("bot")
+        success = latest.get("bot_success") or latest.get("bot")
+        failure = latest.get("bot_failure")
+        stale_after = max(60.0, settings.ingestion_poll_interval_seconds * 3)
+        now = datetime.now(UTC)
+
+        def aware(dt):
+            return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+        if alive is None:
             checks["bot"] = "missing"
         else:
-            seen_at = heartbeat.seen_at
-            if seen_at.tzinfo is None:
-                seen_at = seen_at.replace(tzinfo=UTC)
-            age_seconds = (datetime.now(UTC) - seen_at).total_seconds()
-            stale_after = max(60.0, settings.ingestion_poll_interval_seconds * 3)
-            checks["bot"] = "ok" if age_seconds <= stale_after else "stale"
+            alive_at = aware(alive.seen_at)
+            heartbeat_times["process_seen_at"] = alive_at.isoformat()
+            checks["bot"] = (
+                "ok" if (now - alive_at).total_seconds() <= stale_after else "stale"
+            )
+
+        success_at = aware(success.seen_at) if success is not None else None
+        failure_at = aware(failure.seen_at) if failure is not None else None
+        heartbeat_times["last_success_at"] = (
+            success_at.isoformat() if success_at is not None else None
+        )
+        heartbeat_times["last_failure_at"] = (
+            failure_at.isoformat() if failure_at is not None else None
+        )
+
+        if success_at is None:
+            checks["bot_cycle"] = "failing" if failure_at is not None else "missing"
+        elif failure_at is not None and failure_at > success_at:
+            checks["bot_cycle"] = "failing"
+        elif (now - success_at).total_seconds() > stale_after:
+            checks["bot_cycle"] = "stale"
+        else:
+            checks["bot_cycle"] = "ok"
     except Exception as exc:  # noqa: BLE001
         checks["bot"] = f"error: {type(exc).__name__}"
+        checks["bot_cycle"] = f"error: {type(exc).__name__}"
 
     ok = all(v == "ok" for v in checks.values())
-    return {"status": "ok" if ok else "degraded", "checks": checks}
+    return {
+        "status": "ok" if ok else "degraded",
+        "checks": checks,
+        "heartbeat": heartbeat_times,
+    }
 
 
 @app.get("/system/status")
@@ -186,6 +230,18 @@ async def list_wallets(db: AsyncSession = Depends(get_db)) -> dict:
                 "created_at": _iso(w.created_at),
                 "composite_score": (
                     scores[w.id].composite_score if w.id in scores else None
+                ),
+                "score_verdict": (
+                    scores[w.id].behavioral_tags[0].get("verdict")
+                    if (
+                        w.id in scores
+                        and scores[w.id].behavioral_tags
+                        and isinstance(scores[w.id].behavioral_tags[0], dict)
+                    )
+                    else None
+                ),
+                "score_computed_at": (
+                    _iso(scores[w.id].computed_at) if w.id in scores else None
                 ),
             }
             for w in wallets

@@ -104,7 +104,7 @@ class Trade(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    polymarket_trade_id: Mapped[str] = mapped_column(String(160))
+    polymarket_trade_id: Mapped[str] = mapped_column(Text)
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"), index=True)
     # The CLOB token actually traded — first-class tradable identity.
@@ -165,7 +165,7 @@ class Signal(Base):
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"), index=True)
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), index=True)
     # Canonical identity of the source trade (data-api:... composite key).
-    source_trade_id: Mapped[str] = mapped_column(String(160))
+    source_trade_id: Mapped[str] = mapped_column(Text)
     # CLOB token actually traded by the source wallet — carried from
     # Trade.asset_id so execution never depends on Gamma outcome->token
     # metadata, which may be missing or stale (PR #7 hardening).
@@ -210,7 +210,7 @@ class PaperOrder(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    idempotency_key: Mapped[str] = mapped_column(String(200))
+    idempotency_key: Mapped[str] = mapped_column(Text)
     signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"))
     market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"))
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id"))

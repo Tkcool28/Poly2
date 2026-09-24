@@ -74,6 +74,21 @@ async def _verify(db_url: str) -> None:
             "AND column_name='source_trade_id'"
         )
         assert await conn.fetchval(
+            "SELECT data_type = 'text' FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='trades' "
+            "AND column_name='polymarket_trade_id'"
+        )
+        assert await conn.fetchval(
+            "SELECT data_type = 'text' FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='signals' "
+            "AND column_name='source_trade_id'"
+        )
+        assert await conn.fetchval(
+            "SELECT data_type = 'text' FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name='paper_orders' "
+            "AND column_name='idempotency_key'"
+        )
+        assert await conn.fetchval(
             "SELECT approved_at IS NOT NULL FROM wallets WHERE address='0xlegacy'"
         )
         cols = {
@@ -111,4 +126,60 @@ def test_upgrade_from_populated_pre_pr_e_schema_postgres(
     asyncio.run(_seed(db_url))
     command.upgrade(cfg, "head")
     asyncio.run(_verify(db_url))
+    get_settings.cache_clear()
+
+
+async def _column_type(db_url: str, table: str, column: str) -> tuple[str, int | None]:
+    conn = await asyncpg.connect(_dsn(db_url))
+    try:
+        row = await conn.fetchrow(
+            "SELECT data_type, character_maximum_length "
+            "FROM information_schema.columns "
+            "WHERE table_schema='public' AND table_name=$1 AND column_name=$2",
+            table,
+            column,
+        )
+        assert row is not None
+        return row["data_type"], row["character_maximum_length"]
+    finally:
+        await conn.close()
+
+
+def test_canonical_identity_migration_downgrade_upgrade_round_trip(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    db_url = os.environ.get("POLYCOPY_TEST_POSTGRES_URL")
+    if not db_url:
+        pytest.skip("requires POLYCOPY_TEST_POSTGRES_URL")
+
+    cfg = _cfg(db_url, monkeypatch)
+    command.downgrade(cfg, "0005")
+
+    assert asyncio.run(_column_type(db_url, "trades", "polymarket_trade_id")) == (
+        "character varying",
+        160,
+    )
+    assert asyncio.run(_column_type(db_url, "signals", "source_trade_id")) == (
+        "character varying",
+        160,
+    )
+    assert asyncio.run(_column_type(db_url, "paper_orders", "idempotency_key")) == (
+        "character varying",
+        200,
+    )
+
+    command.upgrade(cfg, "head")
+
+    assert asyncio.run(_column_type(db_url, "trades", "polymarket_trade_id")) == (
+        "text",
+        None,
+    )
+    assert asyncio.run(_column_type(db_url, "signals", "source_trade_id")) == (
+        "text",
+        None,
+    )
+    assert asyncio.run(_column_type(db_url, "paper_orders", "idempotency_key")) == (
+        "text",
+        None,
+    )
     get_settings.cache_clear()

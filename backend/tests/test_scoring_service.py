@@ -145,6 +145,17 @@ async def test_immature_wallet_stays_discovered_and_rescannable(session):
 
     result = await score_wallet(session, wallet, now=NOW)
     assert result.verdict == "insufficient_history"
+    assert result.composite is None
+    persisted = (
+        await session.execute(
+            select(WalletScore)
+            .where(WalletScore.wallet_id == wallet.id)
+            .order_by(WalletScore.id.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+    assert persisted.composite_score is None
+    assert persisted.behavioral_tags[0]["verdict"] == "insufficient_history"
     await session.refresh(wallet)
     assert wallet.approval_state == "discovered"  # NOT rejected
 

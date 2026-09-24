@@ -97,6 +97,7 @@ async def _seed_approved_trade(
     ingested_at=None,
     traded_at=None,
     asset_id="4667",
+    trade_id=None,
 ) -> Trade:
     wallet = Wallet(
         address=address,
@@ -119,7 +120,11 @@ async def _seed_approved_trade(
     session.add(market)
     await session.flush()
     trade = Trade(
-        polymarket_trade_id=f"data-api:0xtx{address}:{address}:4667:5:{price}:1",
+        polymarket_trade_id=(
+            trade_id
+            if trade_id is not None
+            else f"data-api:0xtx{address}:{address}:4667:5:{price}:1"
+        ),
         market_id=market.id,
         wallet_id=wallet.id,
         asset_id=asset_id,
@@ -150,6 +155,34 @@ async def test_detect_signals_only_approved_and_idempotent(session):
 
     # Second pass: no duplicates (idempotent on source_trade_id).
     assert await detect_signals(session, now=NOW) == 0
+
+
+async def test_long_source_trade_id_persists_paper_idempotency_key(session):
+    long_trade_id = (
+        "data-api:"
+        + "0x"
+        + "b" * 64
+        + ":"
+        + "0x"
+        + "a" * 40
+        + ":"
+        + "9" * 77
+        + ":123456789.123456:0.987654:1789795243"
+    )
+    assert len(long_trade_id) > 200
+
+    await _seed_approved_trade(session, trade_id=long_trade_id)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    assert signal.source_trade_id == long_trade_id
+
+    async with _make_client() as client:
+        order = await execute_signal(session, client, signal)
+
+    assert order.idempotency_key == f"paper:{long_trade_id}"
+    assert len(order.idempotency_key) > 200
+    persisted = (await session.execute(select(PaperOrder))).scalar_one()
+    assert persisted.idempotency_key == order.idempotency_key
 
 
 async def test_execute_full_fill_records_evidence(session):
