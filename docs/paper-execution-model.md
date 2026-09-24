@@ -72,9 +72,16 @@ regression pins the exact arithmetic.
 - **Token identity** — the book request uses the source trade's
   `asset_id` (carried onto the signal). Gamma outcome→token metadata is
   fallback evidence only; it may be missing or stale.
-- **Kill switch** — defers, never consumes: signal stays pending, no
-  PaperOrder, no CLOB request; it becomes eligible when the switch
-  clears (see `docs/safety.md`).
+- **Kill switch** — a fresh signal stays pending without a CLOB request;
+  each bounded execution cycle increments its persisted deferral count.
+  Once the source trade is older than
+  `POLYCOPY_MAX_SIGNAL_EXECUTION_AGE_SECONDS` (300), it becomes a recorded
+  `stale_signal` missed paper order, even while the switch remains on.
+  No stale signal can later fill after the switch clears (see `docs/safety.md`).
+- **Freshness** — the age limit is measured from source trade time `t₀` to
+  paper decision time, alongside the existing minimum review delay from
+  ingestion time `t₁`. A late source observation is missed, never copied
+  against a later book.
 - **Approval recheck** — wallet approval is re-validated at execution
   time; a wallet disabled during the review delay → missed
   (`wallet_not_approved`), no book request.

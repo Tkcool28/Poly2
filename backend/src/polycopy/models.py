@@ -199,6 +199,7 @@ class Signal(Base):
     confidence: Mapped[float | None] = mapped_column(Float)
     # pending -> executed | skipped (reason in the decision log)
     status: Mapped[str] = mapped_column(String(20), default="pending")
+    kill_switch_deferrals: Mapped[int] = mapped_column(Integer, default=0)
     t0_traded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     # Honest detection time = when ingestion first saw the trade
     # (Trade.ingested_at), not when a later detect_signals() query ran —

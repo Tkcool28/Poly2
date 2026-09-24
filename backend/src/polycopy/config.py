@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # A signal is not eligible to execute until t1_detected_at + this many
     # seconds. Detection/decision evidence reflects the configured delay.
     review_delay_seconds: float = 30.0
+    # Source-trade t0 to paper decision; prevents old kill-switch backlogs
+    # from executing against a much later order book.
+    max_signal_execution_age_seconds: float = 300.0
     # Per-cycle bounds (PR #7 hardening): one cycle never exceeds this many
     # new signals / book requests, so a backlogged DB can never turn into
     # an unbounded execution storm (the VPS OOM lesson).
