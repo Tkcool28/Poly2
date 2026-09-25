@@ -50,7 +50,31 @@ def test_api_ingress_and_deploy_health_url():
     deploy = read("infra/deploy.sh")
     assert "docker compose config --format json" in deploy
     assert 'health_url="http://${ingress_address}/api/health"' in deploy
+    assert 'dashboard_url="http://${ingress_address}/"' in deploy
     assert 'curl -fsS "$health_url"' in deploy
+    assert 'curl -fsS "$dashboard_url"' in deploy
+
+
+def test_deploy_waits_for_upstreams_then_refreshes_nginx_and_fails_closed():
+    deploy = read("infra/deploy.sh")
+
+    start = deploy.index("docker compose up -d\n")
+    upstream_ready = deploy.index(
+        "docker compose up -d --wait --wait-timeout 120 backend frontend"
+    )
+    nginx_refresh = deploy.index(
+        "docker compose up -d --force-recreate --no-deps nginx"
+    )
+    final_health = deploy.index('curl -fsS "$health_url"', nginx_refresh)
+
+    assert start < upstream_ready < nginx_refresh < final_health
+    assert "set -euo pipefail" in deploy
+    assert "docker compose run --rm migrate" in deploy
+    assert "docker compose down" not in deploy
+    assert "down -v" not in deploy
+    assert "postgres_data" not in deploy
+    assert 'echo "nginx/API/dashboard did not become healthy in time." >&2' in deploy
+    assert deploy.rstrip().endswith("exit 1")
 
 
 
