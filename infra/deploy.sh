@@ -20,6 +20,7 @@ if ":" in host:
 print("{}:{}".format(host, port["published"]))
 ')
 health_url="http://${ingress_address}/api/health"
+dashboard_url="http://${ingress_address}/"
 
 echo "Pulling latest images and rebuilding..."
 docker compose pull
@@ -31,14 +32,26 @@ docker compose run --rm migrate
 echo "Starting stack..."
 docker compose up -d
 
-echo "Waiting for backend health..."
+echo "Waiting for backend and frontend health..."
+docker compose up -d --wait --wait-timeout 120 backend frontend
+
+# nginx resolves Compose service names when it starts. If backend/frontend were
+# recreated above while an unchanged nginx container was retained, nginx can
+# keep stale upstream addresses. Recreate nginx only after both upstreams are
+# healthy so it resolves their current addresses every deployment.
+echo "Refreshing nginx upstream addresses..."
+docker compose up -d --force-recreate --no-deps nginx
+
+echo "Waiting for nginx/API/dashboard health..."
 for i in $(seq 1 30); do
-    if curl -fsS "$health_url" >/dev/null 2>&1; then
+    if curl -fsS "$health_url" >/dev/null 2>&1 \
+        && curl -fsS "$dashboard_url" >/dev/null 2>&1; then
         echo "Stack is up. Dashboard: http://${ingress_address}/"
         exit 0
     fi
     sleep 2
 done
 
-echo "Backend did not become healthy in time. Check: docker compose logs backend" >&2
+echo "nginx/API/dashboard did not become healthy in time." >&2
+echo "Check: docker compose logs nginx backend frontend" >&2
 exit 1
