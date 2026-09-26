@@ -45,14 +45,13 @@ def walk_book(
     bids: list[BookLevel],
     asks: list[BookLevel],
     *,
-    fee_rate: Decimal = Decimal(0),
     max_shares: Decimal | None = None,
-) -> tuple[FillResult, Decimal]:
+) -> FillResult:
     """Simulate a market order of ``size_usd`` notional against the book.
 
     BUY consumes asks (best = lowest price first); SELL consumes bids
-    (best = highest first). Returns (FillResult, fee). Fee is charged on
-    filled notional; zero when nothing fills.
+    (best = highest first). Fees are calculated from the resulting fill
+    using the market's authoritative fee curve by the execution service.
 
     ``max_shares`` caps the shares taken (e.g. never sell more than the
     paper position owns). The cap binds before the notional target.
@@ -81,10 +80,7 @@ def walk_book(
     )
     depth = sum((lv.size for lv in levels), Decimal(0))
     if not levels or depth <= 0:
-        return (
-            FillResult("missed", Decimal(0), None, Decimal(0), 0),
-            Decimal(0),
-        )
+        return FillResult("missed", Decimal(0), None, Decimal(0), 0)
 
     remaining_usd = size_usd
     remaining_shares = max_shares  # None = uncapped
@@ -115,20 +111,12 @@ def walk_book(
             break
         remaining_usd -= take * lv.price
 
-    spent = size_usd - remaining_usd  # actual notional filled
     if shares <= 0:
-        return (
-            FillResult("missed", Decimal(0), None, depth, 0),
-            Decimal(0),
-        )
+        return FillResult("missed", Decimal(0), None, depth, 0)
 
     vwap = notional / shares  # exact per-level prices, no division dust
     # Filled = notional target met. If the share cap (or depth) bound first,
     # the target wasn't met → partial. filled_size and the position change
     # always agree because the cap is applied INSIDE the walk.
     status = "filled" if remaining_usd <= 0 else "partial"
-    fee = (spent * fee_rate).quantize(Decimal("0.000001"))
-    return (
-        FillResult(status, shares, vwap, depth, used),
-        fee,
-    )
+    return FillResult(status, shares, vwap, depth, used)

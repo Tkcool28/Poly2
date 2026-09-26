@@ -15,6 +15,7 @@ Endpoints:
 * Gamma API ``GET /markets?condition_ids=`` — market metadata + token map
 * Gamma API ``GET /markets?clob_token_ids=`` — token-identity fallback
 * CLOB API ``GET /markets/{condition_id}`` — token map fallback
+* CLOB API ``GET /clob-markets/{condition_id}`` — decision-time fee curve
 * CLOB API ``GET /book?token_id=`` — order book for paper fills (PR-E)
 
 Gamma historical-market note: resolved markets must be requested explicitly
@@ -266,6 +267,10 @@ class PolymarketClient:
     async def get_clob_market(self, condition_id: str) -> dict[str, Any]:
         """CLOB market object (token mapping fallback)."""
         return await self._get(f"{CLOB_API_BASE}/markets/{condition_id}")
+
+    async def get_clob_market_info(self, condition_id: str) -> dict[str, Any]:
+        """Authoritative CLOB market details, including ``fd`` fee parameters."""
+        return await self._get(f"{CLOB_API_BASE}/clob-markets/{condition_id}")
 
     async def get_order_book(self, token_id: str) -> dict[str, Any]:
         """CLOB order book for one token: {"bids": [...], "asks": [...]}.

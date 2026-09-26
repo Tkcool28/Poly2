@@ -62,6 +62,10 @@ class FakeApis:
         self.book_calls += 1
         return self.book
 
+    async def get_clob_market_info(self, condition_id):
+        assert condition_id == "market-new"
+        return {"fd": {"r": 0, "e": 1, "to": True}}
+
 
 def trade(index: int, timestamp: datetime, *, market: str) -> dict:
     return {"transactionHash": f"0x{index:064x}", "proxyWallet": ADDRESS,

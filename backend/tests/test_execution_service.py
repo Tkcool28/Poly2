@@ -24,6 +24,7 @@ from polycopy.execution.service import (
     detect_signals,
     execute_signal,
     run_execution_cycle,
+    settle_paper_positions,
 )
 from polycopy.ingestion.client import PolymarketClient
 from polycopy.models import (
@@ -32,6 +33,7 @@ from polycopy.models import (
     Market,
     PaperOrder,
     Position,
+    Settlement,
     Signal,
     Trade,
     Wallet,
@@ -75,9 +77,17 @@ async def session():
     await engine.dispose()
 
 
-def _make_client(book: dict | Exception | None = None) -> PolymarketClient:
+def _make_client(
+    book: dict | Exception | None = None,
+    fee_data: dict | Exception | None = None,
+) -> PolymarketClient:
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "clob.polymarket.com"
+        if request.url.path.startswith("/clob-markets/"):
+            if isinstance(fee_data, Exception):
+                raise fee_data
+            return httpx.Response(200, json=fee_data if fee_data is not None
+                                  else {"fd": {"r": 0, "e": 1, "to": True}})
         assert request.url.path == "/book"
         if isinstance(book, Exception):
             raise book
@@ -290,6 +300,8 @@ async def test_kill_switch_backlog_expires_as_stale_miss_without_book(session, m
 
     def book(request: httpx.Request) -> httpx.Response:
         nonlocal book_requests
+        if request.url.path.startswith("/clob-markets/"):
+            return httpx.Response(200, json={"fd": {"r": 0, "e": 1, "to": True}})
         book_requests += 1
         return httpx.Response(200, json=BOOK)
 
@@ -533,17 +545,129 @@ async def test_exposure_cap_blocks_oversize(session, monkeypatch):
     assert order.miss_reason == "exposure_cap"
 
 
-async def test_fee_rate_applies_to_fill_notional(session, monkeypatch):
-    monkeypatch.setenv("POLYCOPY_PAPER_FEE_RATE", "0.01")
-    get_settings.cache_clear()
+async def test_market_fee_uses_actual_fill_and_persists_evidence(session):
     await _seed_approved_trade(session)
     await detect_signals(session, now=NOW)
     signal = (await session.execute(select(Signal))).scalar_one()
 
-    async with _make_client() as client:
+    async with _make_client(fee_data={"fd": {"r": 0.05, "e": 1, "to": True}}) as client:
         order = await execute_signal(session, client, signal)
 
-    assert order.fee == Decimal("0.100000")  # 1% of $10
+    assert order.fee == Decimal("0.25000")  # 20 × .05 × .50 × .50
+    assert order.fee_enabled is True
+    assert order.fee_metadata_state == "curve"
+    assert order.fee_rate_coefficient == "0.05"
+    assert order.fee_exponent == "1"
+    assert order.fee_taker_only is True
+    assert order.fee_liquidity_role == "taker"
+    assert order.fee_source == "GET /clob-markets/{condition_id}"
+    assert order.fee_metadata_retrieved_at is not None
+    assert Decimal(order.fee_calculation_shares) == 20
+    assert Decimal(order.fee_calculation_price) == Decimal("0.5")
+    await session.refresh(order)
+    assert order.fee == Decimal("0.250000")
+
+
+async def test_zero_fee_metadata_ignores_obsolete_global_setting(session, monkeypatch):
+    monkeypatch.setenv("POLYCOPY_PAPER_FEE_RATE", "0.99")
+    get_settings.cache_clear()
+    await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    async with _make_client() as client:
+        order = await execute_signal(session, client, signal)
+    assert order.fee == 0
+    assert order.fee_enabled is False
+    assert order.fee_rate_coefficient == "0"
+
+
+@pytest.mark.parametrize("fee_data,state", [
+    ({}, "absent"), ({"fd": None}, "null"), ({"fd": {}}, "empty"),
+])
+async def test_fee_free_market_without_fee_block_executes(session, fee_data, state):
+    await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    async with _make_client(fee_data=fee_data) as client:
+        order = await execute_signal(session, client, signal)
+    assert order.status == "filled"
+    assert order.fee == 0
+    assert order.fee_enabled is False
+    assert order.fee_metadata_state == state
+    assert order.fee_rate_coefficient == "0"
+    assert order.fee_exponent == "0"
+    assert order.fee_taker_only is None
+    assert (await session.execute(select(Position))).scalar_one().avg_price == Decimal("0.5")
+
+
+async def test_partial_fee_and_settlement_cost_basis(session):
+    await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    book = {"bids": [], "asks": [{"price": "0.50", "size": "10"}]}
+    async with _make_client(book, {"fd": {"r": "0.05", "e": 1, "to": True}}) as client:
+        order = await execute_signal(session, client, signal)
+    assert order.status == "partial"
+    assert order.filled_size == 10
+    assert order.fee == Decimal("0.12500")
+    position = (await session.execute(select(Position))).scalar_one()
+    assert position.avg_price == Decimal("0.512500")
+    session.add(Settlement(market_id=signal.market_id, winning_outcome="Up"))
+    await session.commit()
+    assert (await settle_paper_positions(session, now=NOW))["settled"] == 1
+    assert position.realized_pnl == Decimal("4.875000")
+    assert (await settle_paper_positions(session, now=NOW))["settled"] == 0
+
+
+async def test_buy_fee_is_included_in_existing_exposure_cap(session, monkeypatch):
+    monkeypatch.setenv("POLYCOPY_MAX_EXPOSURE_PER_MARKET_USD", "10.10")
+    get_settings.cache_clear()
+    await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    async with _make_client(fee_data={"fd": {"r": "0.05", "e": 1, "to": True}}) as client:
+        order = await execute_signal(session, client, signal)
+    assert order.status == "missed"
+    assert order.miss_reason == "exposure_cap"
+    assert await session.scalar(select(func.count(Position.id))) == 0
+
+
+@pytest.mark.parametrize("fee_data", [
+    {"fd": {"r": "NaN", "e": 1, "to": True}},
+    {"fd": {"r": "0.05"}},
+    {"fd": "malformed"},
+])
+async def test_bad_fee_metadata_leaves_signal_pending_without_fill(session, fee_data):
+    await _seed_approved_trade(session)
+    async with _make_client(fee_data=fee_data) as client:
+        stats = await run_execution_cycle(session, client)
+    assert stats["errors"] == 1
+    assert stats["filled"] == 0
+    assert (await session.execute(select(Signal))).scalar_one().status == "pending"
+    assert await session.scalar(select(func.count(PaperOrder.id))) == 0
+
+
+async def test_fee_info_outage_retries_without_zero_fee_fill(session):
+    await _seed_approved_trade(session)
+    async with _make_client(fee_data=httpx.ConnectError("fee info down")) as client:
+        stats = await run_execution_cycle(session, client)
+    assert stats["errors"] == 1
+    assert (await session.execute(select(Signal))).scalar_one().status == "pending"
+    assert await session.scalar(select(func.count(PaperOrder.id))) == 0
+
+
+async def test_clob_fee_info_uses_market_specific_endpoint():
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json={"fd": {"r": 0, "e": 1, "to": True}})
+
+    async with PolymarketClient(
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    ) as client:
+        assert (await client.get_clob_market_info("0xcondition"))["fd"]["r"] == 0
+    assert paths == ["/clob-markets/0xcondition"]
 
 
 async def test_run_execution_cycle_end_to_end(session):
@@ -611,6 +735,8 @@ async def test_asset_id_used_when_gamma_mapping_absent(session):
     seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/clob-markets/"):
+            return httpx.Response(200, json={"fd": {"r": 0, "e": 1, "to": True}})
         seen.append(request.url.params["token_id"])
         return httpx.Response(200, json=BOOK)
 
@@ -669,31 +795,30 @@ async def test_disabled_wallet_cannot_execute_delayed_signal(session):
 async def test_fee_aware_buy_sell_round_trip(session, monkeypatch):
     """HARDENING #9: BUY fee enters cost basis, SELL fee exits realized
     P&L — PaperOrder fees and portfolio P&L agree exactly."""
-    monkeypatch.setenv("POLYCOPY_PAPER_FEE_RATE", "0.01")
     monkeypatch.setenv("POLYCOPY_MAX_ORDER_SIZE_USD", "20")
     get_settings.cache_clear()
 
-    # BUY: $20 at ask 0.50 → 40 shares, fee $0.20 → cost basis 20.20,
-    # avg_price = 20.20/40 = 0.505.
+    # BUY: $20 at ask 0.50 → 40 shares, fee $0.20 → cost basis 20.20.
     await _seed_approved_trade(session, address="0xbuyer")
     await detect_signals(session, now=NOW)
     signal = (await session.execute(select(Signal))).scalar_one()
     book_buy = {"bids": [{"price": "0.48", "size": "500"}],
                 "asks": [{"price": "0.50", "size": "100"}]}
-    async with _make_client(book_buy) as client:
+    fee_data = {"fd": {"r": "0.02", "e": 1, "to": True}}
+    async with _make_client(book_buy, fee_data) as client:
         buy_order = await execute_signal(session, client, signal)
     assert buy_order.status == "filled"
     fee_buy = Decimal(str(buy_order.fee))
-    assert fee_buy == Decimal("0.200000")  # 1% of $20
+    assert fee_buy == Decimal("0.20000")
     position = (await session.execute(select(Position))).scalar_one()
     avg = Decimal(str(position.avg_price))
     qty = Decimal(str(position.quantity))
     assert qty == Decimal("40.000000")
     assert avg == (Decimal("20.20") / 40).quantize(Decimal("0.000001"))
 
-    # SELL all 40 shares at bid 1.00 with a $40 order so the full
-    # position exits; fee 1% of $40 = $0.40.
-    monkeypatch.setenv("POLYCOPY_MAX_ORDER_SIZE_USD", "40")
+    # SELL all 40 shares at bid 0.50 with a $20 order so the full
+    # position exits; fee is another $0.20.
+    monkeypatch.setenv("POLYCOPY_MAX_ORDER_SIZE_USD", "20")
     get_settings.cache_clear()
     sell_trade = await _seed_approved_trade(
         session, address="0xseller", side="SELL", price=0.99
@@ -705,22 +830,21 @@ async def test_fee_aware_buy_sell_round_trip(session, monkeypatch):
     sell_signal = (
         await session.execute(select(Signal).where(Signal.side == "SELL"))
     ).scalar_one()
-    book_sell = {"bids": [{"price": "1.00", "size": "100"}],
-                 "asks": [{"price": "1.00", "size": "100"}]}
-    async with _make_client(book_sell) as client:
+    book_sell = {"bids": [{"price": "0.50", "size": "100"}],
+                 "asks": [{"price": "0.50", "size": "100"}]}
+    async with _make_client(book_sell, fee_data) as client:
         sell_order = await execute_signal(session, client, sell_signal)
 
     assert sell_order.status == "filled"
     fee_sell = Decimal(str(sell_order.fee))
-    assert fee_sell == Decimal("0.400000")  # 1% of $40
+    assert fee_sell == Decimal("0.20000")
     await session.refresh(position)
     realized = Decimal(str(position.realized_pnl))
-    # Exact: 40 × (1.00 − 0.505) − 0.40 = 19.80 − 0.40 = 19.40
-    assert realized == Decimal("19.400000")
+    # Exact: 40 × (0.50 − 0.505) − 0.20 = −0.40.
+    assert realized == Decimal("-0.400000")
     assert Decimal(str(position.quantity)) == Decimal("0.000000")
     # PaperOrder fees and portfolio P&L cannot disagree:
-    # cash out (40×1 − 0.40) − cash in (20 + 0.20) = 19.40 == realized.
-    assert (Decimal(40) - fee_sell) - (Decimal(20) + fee_buy) == realized
+    assert (Decimal(20) - fee_sell) - (Decimal(20) + fee_buy) == realized
 
 
 async def test_malformed_book_fails_closed(session):
@@ -756,6 +880,8 @@ async def test_one_failed_signal_does_not_block_later_signals(session):
     await detect_signals(session, now=NOW)
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/clob-markets/"):
+            return httpx.Response(200, json={"fd": {"r": 0, "e": 1, "to": True}})
         if request.url.params["token_id"] == "1111":
             # Persistent failure (the client retries transient errors —
             # every attempt for THIS token must fail).
@@ -793,6 +919,8 @@ async def test_execution_backlog_is_bounded(session, monkeypatch):
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests["n"] += 1
+        if request.url.path.startswith("/clob-markets/"):
+            return httpx.Response(200, json={"fd": {"r": 0, "e": 1, "to": True}})
         return httpx.Response(200, json=BOOK)
 
     transport = httpx.MockTransport(handler)
@@ -803,7 +931,7 @@ async def test_execution_backlog_is_bounded(session, monkeypatch):
 
     assert stats["signals_created"] == 2  # detection bound
     assert stats["filled"] == 2  # execution bound
-    assert requests["n"] == 2  # deterministic max CLOB requests
+    assert requests["n"] == 4  # one book and one fee-info request per fill
 
 
 async def test_positions_are_isolated_by_source_wallet(session):

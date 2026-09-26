@@ -254,6 +254,19 @@ class PaperOrder(Base):
     levels_consumed: Mapped[int | None] = mapped_column(Integer)
     realized_pnl_delta: Mapped[float | None] = mapped_column(Numeric(20, 6))
     fee: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    # Nullable for pre-migration orders: never reconstruct historical fees
+    # using today's curve. Exact decimal operands survive rounded display
+    # columns (fill_price and filled_size are six-place NUMERIC fields).
+    fee_enabled: Mapped[bool | None] = mapped_column(Boolean)
+    fee_metadata_state: Mapped[str | None] = mapped_column(String(12))
+    fee_rate_coefficient: Mapped[str | None] = mapped_column(Text)
+    fee_exponent: Mapped[str | None] = mapped_column(Text)
+    fee_taker_only: Mapped[bool | None] = mapped_column(Boolean)
+    fee_liquidity_role: Mapped[str | None] = mapped_column(String(12))
+    fee_source: Mapped[str | None] = mapped_column(String(100))
+    fee_metadata_retrieved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    fee_calculation_shares: Mapped[str | None] = mapped_column(Text)
+    fee_calculation_price: Mapped[str | None] = mapped_column(Text)
     # Raw detection-time book ({"bids": [[price, size], ...], "asks": ...}).
     book_snapshot: Mapped[dict | None] = mapped_column(JSON)
     # Why status == "missed" (e.g. "no_book_depth", "market_closed",

@@ -30,6 +30,7 @@ order path. Paper fills update paper Positions only.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from datetime import datetime as WallClock
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -38,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.config import get_settings
 from polycopy.execution.bookwalk import BookLevel, walk_book
+from polycopy.execution.fees import FEE_SOURCE, MarketFee
 from polycopy.ingestion.client import PolymarketClient
 from polycopy.logging_config import get_logger
 from polycopy.models import (
@@ -227,7 +229,6 @@ async def execute_signal(
     settings = get_settings()
     now = now or datetime.now(UTC)
     size_usd = Decimal(str(settings.max_order_size_usd))
-    fee_rate = Decimal(str(settings.paper_fee_rate))
 
     # Source time is the only honest age boundary for copyability; t1 may
     # already be delayed by source outages or process restarts. An expired
@@ -331,9 +332,7 @@ async def execute_signal(
         "asks": [[str(lv.price), str(lv.size)] for lv in asks],
     }
 
-    result, fee = walk_book(
-        signal.side, size_usd, bids, asks, fee_rate=fee_rate, max_shares=owned
-    )
+    result = walk_book(signal.side, size_usd, bids, asks, max_shares=owned)
     if result.status == "missed":
         order = await _record_skip(session, signal, reason="no_book_depth", now=now,
                                    order_kwargs={"book_snapshot": snapshot,
@@ -350,6 +349,33 @@ async def execute_signal(
     if signal.side == "BUY" and result.fill_price >= Decimal(str(settings.max_copy_price)):
         order = await _record_skip(
             session, signal, reason="price_zone", now=now,
+            order_kwargs={"book_snapshot": snapshot,
+                          "book_depth_shares": result.depth_available,
+                          "levels_consumed": result.levels_consumed},
+        )
+        await session.commit()
+        return order
+
+    # Each executable fill is a taker of existing book liquidity. The CLOB
+    # market-info response, fetched at decision time, is the fee authority;
+    # a failed request or malformed fd raises and leaves the signal pending
+    # for a bounded later retry (or the existing stale-signal expiry).
+    fee_info = await client.get_clob_market_info(market.condition_id)
+    fee_retrieved_at = WallClock.now(UTC)
+    market_fee = MarketFee.from_market_info(fee_info)
+    fee = market_fee.taker_fee(result.filled_size, result.fill_price)
+
+    # Existing exposure is fee-inclusive position cost basis. The gross
+    # request stays $10; use actual filled notional + BUY fee for the final
+    # cap check before any position or order is written.
+    if signal.side == "BUY" and (
+        global_exp + result.filled_size * result.fill_price + fee
+        > Decimal(str(settings.max_exposure_global_usd))
+        or market_exp + result.filled_size * result.fill_price + fee
+        > Decimal(str(settings.max_exposure_per_market_usd))
+    ):
+        order = await _record_skip(
+            session, signal, reason="exposure_cap", now=now,
             order_kwargs={"book_snapshot": snapshot,
                           "book_depth_shares": result.depth_available,
                           "levels_consumed": result.levels_consumed},
@@ -374,6 +400,16 @@ async def execute_signal(
         book_depth_shares=result.depth_available,
         levels_consumed=result.levels_consumed,
         fee=fee,
+        fee_enabled=market_fee.rate > 0,
+        fee_metadata_state=market_fee.metadata_state,
+        fee_rate_coefficient=str(market_fee.rate),
+        fee_exponent=str(market_fee.exponent),
+        fee_taker_only=market_fee.taker_only,
+        fee_liquidity_role="taker",
+        fee_source=FEE_SOURCE,
+        fee_metadata_retrieved_at=fee_retrieved_at,
+        fee_calculation_shares=str(result.filled_size),
+        fee_calculation_price=str(result.fill_price),
         book_snapshot=snapshot,
     )
     session.add(order)
