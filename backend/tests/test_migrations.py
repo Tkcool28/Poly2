@@ -183,7 +183,7 @@ def test_fee_evidence_migration_preserves_existing_orders(monkeypatch: pytest.Mo
             )
             assert row is not None
             assert row["fee"] == 0
-            assert all(row[key] is None for key in row if key != "fee")
+            assert all(value is None for key, value in dict(row).items() if key != "fee")
         finally:
             await conn.close()
 
