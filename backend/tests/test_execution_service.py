@@ -555,6 +555,7 @@ async def test_market_fee_uses_actual_fill_and_persists_evidence(session):
 
     assert order.fee == Decimal("0.25000")  # 20 × .05 × .50 × .50
     assert order.fee_enabled is True
+    assert order.fee_metadata_state == "curve"
     assert order.fee_rate_coefficient == "0.05"
     assert order.fee_exponent == "1"
     assert order.fee_taker_only is True
@@ -578,6 +579,25 @@ async def test_zero_fee_metadata_ignores_obsolete_global_setting(session, monkey
     assert order.fee == 0
     assert order.fee_enabled is False
     assert order.fee_rate_coefficient == "0"
+
+
+@pytest.mark.parametrize("fee_data,state", [
+    ({}, "absent"), ({"fd": None}, "null"), ({"fd": {}}, "empty"),
+])
+async def test_fee_free_market_without_fee_block_executes(session, fee_data, state):
+    await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+    async with _make_client(fee_data=fee_data) as client:
+        order = await execute_signal(session, client, signal)
+    assert order.status == "filled"
+    assert order.fee == 0
+    assert order.fee_enabled is False
+    assert order.fee_metadata_state == state
+    assert order.fee_rate_coefficient == "0"
+    assert order.fee_exponent == "0"
+    assert order.fee_taker_only is None
+    assert (await session.execute(select(Position))).scalar_one().avg_price == Decimal("0.5")
 
 
 async def test_partial_fee_and_settlement_cost_basis(session):
@@ -612,7 +632,11 @@ async def test_buy_fee_is_included_in_existing_exposure_cap(session, monkeypatch
     assert await session.scalar(select(func.count(Position.id))) == 0
 
 
-@pytest.mark.parametrize("fee_data", [{}, {"fd": {"r": "NaN", "e": 1, "to": True}}])
+@pytest.mark.parametrize("fee_data", [
+    {"fd": {"r": "NaN", "e": 1, "to": True}},
+    {"fd": {"r": "0.05"}},
+    {"fd": "malformed"},
+])
 async def test_bad_fee_metadata_leaves_signal_pending_without_fill(session, fee_data):
     await _seed_approved_trade(session)
     async with _make_client(fee_data=fee_data) as client:

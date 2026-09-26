@@ -177,7 +177,7 @@ def test_fee_evidence_migration_preserves_existing_orders(monkeypatch: pytest.Mo
         conn = await asyncpg.connect(_dsn(db_url))
         try:
             row = await conn.fetchrow(
-                "SELECT fee, fee_enabled, fee_rate_coefficient, fee_exponent, "
+                "SELECT fee, fee_enabled, fee_metadata_state, fee_rate_coefficient, fee_exponent, "
                 "fee_liquidity_role, fee_source, fee_metadata_retrieved_at "
                 "FROM paper_orders WHERE idempotency_key='paper:old'"
             )

@@ -401,6 +401,7 @@ async def execute_signal(
         levels_consumed=result.levels_consumed,
         fee=fee,
         fee_enabled=market_fee.rate > 0,
+        fee_metadata_state=market_fee.metadata_state,
         fee_rate_coefficient=str(market_fee.rate),
         fee_exponent=str(market_fee.exponent),
         fee_taker_only=market_fee.taker_only,

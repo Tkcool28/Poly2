@@ -258,6 +258,7 @@ class PaperOrder(Base):
     # using today's curve. Exact decimal operands survive rounded display
     # columns (fill_price and filled_size are six-place NUMERIC fields).
     fee_enabled: Mapped[bool | None] = mapped_column(Boolean)
+    fee_metadata_state: Mapped[str | None] = mapped_column(String(12))
     fee_rate_coefficient: Mapped[str | None] = mapped_column(Text)
     fee_exponent: Mapped[str | None] = mapped_column(Text)
     fee_taker_only: Mapped[bool | None] = mapped_column(Boolean)

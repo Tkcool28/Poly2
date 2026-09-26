@@ -18,6 +18,7 @@ depends_on = None
 
 def upgrade() -> None:
     op.add_column("paper_orders", sa.Column("fee_enabled", sa.Boolean()))
+    op.add_column("paper_orders", sa.Column("fee_metadata_state", sa.String(12)))
     op.add_column("paper_orders", sa.Column("fee_rate_coefficient", sa.Text()))
     op.add_column("paper_orders", sa.Column("fee_exponent", sa.Text()))
     op.add_column("paper_orders", sa.Column("fee_taker_only", sa.Boolean()))
@@ -37,4 +38,5 @@ def downgrade() -> None:
     op.drop_column("paper_orders", "fee_taker_only")
     op.drop_column("paper_orders", "fee_exponent")
     op.drop_column("paper_orders", "fee_rate_coefficient")
+    op.drop_column("paper_orders", "fee_metadata_state")
     op.drop_column("paper_orders", "fee_enabled")
