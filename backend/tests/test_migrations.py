@@ -142,6 +142,55 @@ def test_upgrade_from_populated_pre_pr_e_schema_postgres(
     get_settings.cache_clear()
 
 
+def test_fee_evidence_migration_preserves_existing_orders(monkeypatch: pytest.MonkeyPatch):
+    """Upgrade a populated current (0010) schema without repricing a prior fill."""
+    db_url = os.environ.get("POLYCOPY_TEST_POSTGRES_URL")
+    if not db_url:
+        pytest.skip("requires POLYCOPY_TEST_POSTGRES_URL")
+    cfg = _cfg(db_url, monkeypatch)
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, "0010")
+
+    async def seed() -> None:
+        conn = await asyncpg.connect(_dsn(db_url))
+        try:
+            await conn.execute(
+                "INSERT INTO wallets (address, approval_state, is_sample, created_at, updated_at) "
+                "VALUES ('0xfeelegacy', 'approved', false, now(), now())"
+            )
+            await conn.execute(
+                "INSERT INTO markets (condition_id, question, active, closed, created_at) "
+                "VALUES ('0xfeecond', '?', true, false, now())"
+            )
+            await conn.execute(
+                "INSERT INTO paper_orders (idempotency_key, wallet_id, market_id, side, "
+                "size, price, status, fee, created_at) VALUES "
+                "('paper:old', 1, 1, 'BUY', 10, 0.5, 'filled', 0, now())"
+            )
+        finally:
+            await conn.close()
+
+    asyncio.run(seed())
+    command.upgrade(cfg, "head")
+
+    async def verify() -> None:
+        conn = await asyncpg.connect(_dsn(db_url))
+        try:
+            row = await conn.fetchrow(
+                "SELECT fee, fee_enabled, fee_rate_coefficient, fee_exponent, "
+                "fee_liquidity_role, fee_source, fee_metadata_retrieved_at "
+                "FROM paper_orders WHERE idempotency_key='paper:old'"
+            )
+            assert row is not None
+            assert row["fee"] == 0
+            assert all(row[key] is None for key in row if key != "fee")
+        finally:
+            await conn.close()
+
+    asyncio.run(verify())
+    get_settings.cache_clear()
+
+
 async def _column_type(db_url: str, table: str, column: str) -> tuple[str, int | None]:
     conn = await asyncpg.connect(_dsn(db_url))
     try:

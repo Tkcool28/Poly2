@@ -72,9 +72,6 @@ class Settings(BaseSettings):
     execution_batch_size: int = 50
 
     # --- Paper execution --------------------------------------------------
-    # Fee rate applied to paper fill notional (0.01 = 1%). Config, not a
-    # constant: if Polymarket's fee model changes, this changes with it.
-    paper_fee_rate: float = 0.0
     # Entries at this price or higher are skipped (~10% max upside is not
     # worth fees + slippage — docs/wallet-intelligence.md §5).
     max_copy_price: float = 0.90

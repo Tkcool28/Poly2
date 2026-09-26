@@ -54,9 +54,20 @@ they are how we learn whether the strategy survives contact with reality.
 
 ## Fees
 
-Paper fills apply the configured fee rate (`POLYCOPY_PAPER_FEE_RATE`,
-default 0). If Polymarket's fee model changes, this model changes with
-it — fees are config, not constants.
+At each executable fill, Poly2 reads `fd.r`, `fd.e`, and `fd.to` from CLOB
+`GET /clob-markets/{condition_id}`. The immediate book walk is a taker fill.
+Its fee is `filled shares × r × VWAP × (1 − VWAP)^e`, rounded to five USDC
+decimal places. A zero `r` gives a zero fee. Missing or malformed fee data
+prevents execution; the signal remains pending for retry and eventually
+expires under the existing freshness limit. No category-level or global
+fee assumption is used. Existing orders retain their historical recorded
+fees and have null fee-evidence fields; no present-day fee is backfilled.
+
+New fills store the fee curve, taker role, source endpoint, retrieval time,
+and exact Decimal calculation operands alongside the fee. The `$10` size
+remains gross requested notional. A BUY fee adds cash cost and cost basis;
+the fee-inclusive cost is checked against the unchanged position-exposure
+caps before the fill is committed. There is no separate cash-balance model.
 
 Fee accounting is internally consistent (PR #7 hardening): a BUY fee goes
 INTO cost basis (`avg_price`), a SELL fee comes OUT of realized P&L, and
