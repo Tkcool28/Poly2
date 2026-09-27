@@ -58,7 +58,7 @@ class Settings(BaseSettings):
     # sizing can be evaluated later from real detection-time data.
     max_order_size_usd: float = 10.0
     max_exposure_per_market_usd: float = 100.0
-    max_exposure_global_usd: float = 500.0
+    max_exposure_global_usd: float = 200.0
     # A signal is not eligible to execute until t1_detected_at + this many
     # seconds. Detection/decision evidence reflects the configured delay.
     review_delay_seconds: float = 30.0
