@@ -9,13 +9,14 @@ from decimal import Decimal
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 os.environ.setdefault("POLYCOPY_ENVIRONMENT", "test")
 
 from polycopy.bankroll import (
     get_bankroll_account,
+    open_position_cost,
     post_realized_pnl,
     stop_loss_hit,
     sweep_profit_if_due,
@@ -30,6 +31,7 @@ from polycopy.execution.service import (
 from polycopy.ingestion.client import PolymarketClient
 from polycopy.main import app
 from polycopy.models import (
+    BankrollAccount,
     BankrollLedgerEntry,
     Base,
     DecisionLogEntry,
@@ -128,6 +130,21 @@ async def _seed_approved_trade(
     session.add(trade)
     await session.commit()
     return trade
+
+
+async def _seed_open_position(session, *, quantity, avg_price) -> Position:
+    """An open paper position tying up ``quantity × avg_price`` of cash."""
+    trade = await _seed_approved_trade(session)
+    position = Position(
+        wallet_id=trade.wallet_id,
+        market_id=trade.market_id,
+        outcome="Up",
+        quantity=quantity,
+        avg_price=avg_price,
+    )
+    session.add(position)
+    await session.commit()
+    return position
 
 
 # --- Account + ledger basics -------------------------------------------------
@@ -231,6 +248,7 @@ async def test_sweep_waits_until_limit_reached(session):
 
 async def test_buy_missed_when_bankroll_cash_insufficient(session, monkeypatch):
     monkeypatch.setenv("POLYCOPY_MAX_EXPOSURE_GLOBAL_USD", "100000")
+    monkeypatch.setenv("POLYCOPY_MAX_EXPOSURE_PER_MARKET_USD", "100000")
     get_settings.cache_clear()
     trade = await _seed_approved_trade(session)
     await detect_signals(session, now=NOW)
@@ -258,6 +276,7 @@ async def test_buy_missed_when_bankroll_cash_insufficient(session, monkeypatch):
 
 async def test_partial_fill_fits_where_full_fill_would_not(session, monkeypatch):
     monkeypatch.setenv("POLYCOPY_MAX_EXPOSURE_GLOBAL_USD", "100000")
+    monkeypatch.setenv("POLYCOPY_MAX_EXPOSURE_PER_MARKET_USD", "100000")
     get_settings.cache_clear()
     trade = await _seed_approved_trade(session)
     await detect_signals(session, now=NOW)
@@ -352,7 +371,7 @@ async def test_stop_loss_floor_halts_new_buys_but_sells_still_run(
     async with _make_client() as client:
         sell_order = await execute_signal(session, client, sell_signal)
 
-    assert sell_order.status == "filled"
+    assert sell_order.status == "partial"  # capped at owned qty, target unmet
     # SELL realized P&L reached the bankroll ledger anyway.
     entries = (
         await session.execute(
@@ -382,7 +401,9 @@ async def test_sell_posts_realized_pnl_to_bankroll(session):
     async with _make_client() as client:
         order = await execute_signal(session, client, signal)
 
-    assert order.status == "filled"
+    # Capped at the 5 owned shares, so the $10 target is unmet → partial;
+    # all 5 shares still sell and the realized P&L posts.
+    assert order.status == "partial"
     account = await get_bankroll_account(session)
     # 5 × (0.48 bid − 0.40 avg), zero fee → +0.40.
     assert Decimal(str(account.realized_pnl_total)) == Decimal("0.4")
@@ -474,3 +495,208 @@ async def test_settings_endpoint_rejects_negative_limits(client):
     assert client.post(
         "/bankroll/settings", json={"stop_loss_floor_usd": -1}
     ).status_code == 422
+
+
+# --- Sweep cash-availability bound ---------------------------------------------
+
+
+async def test_sweep_is_bounded_by_free_cash(session):
+    account = await get_bankroll_account(session)
+    await post_realized_pnl(session, Decimal(60), context={"kind": "settlement"})
+    await session.commit()
+    # $230 of the $260 balance is deployed → only $30 is actually free.
+    await _seed_open_position(session, quantity=230, avg_price=1)
+
+    swept = await sweep_profit_if_due(session)
+    await session.commit()
+
+    assert swept == Decimal(30)
+    assert Decimal(str(account.withdrawn_total)) == Decimal(30)
+    assert account.sweep_pending is True
+    # The invariant: a withdrawal can never push available cash negative.
+    available = account.balance - await open_position_cost(session)
+    assert available >= 0
+    withdrawal = (
+        await session.execute(
+            select(BankrollLedgerEntry).where(
+                BankrollLedgerEntry.entry_type == "profit_withdrawal"
+            )
+        )
+    ).scalar_one()
+    assert Decimal(str(withdrawal.amount)) == Decimal(-30)
+    assert withdrawal.context["partial"] is True
+
+
+async def test_sweep_zero_when_all_cash_is_deployed(session):
+    account = await get_bankroll_account(session)
+    await post_realized_pnl(session, Decimal(60), context={})
+    await session.commit()
+    # Every dollar is inside open positions → nothing can leave.
+    await _seed_open_position(session, quantity=260, avg_price=1)
+
+    assert await sweep_profit_if_due(session) == 0
+    await session.commit()
+
+    assert Decimal(str(account.withdrawn_total)) == 0
+    assert account.sweep_pending is False
+    # Idempotent: further cycles move nothing while cash stays deployed.
+    assert await sweep_profit_if_due(session) == 0
+    withdrawals = (
+        await session.execute(
+            select(BankrollLedgerEntry).where(
+                BankrollLedgerEntry.entry_type == "profit_withdrawal"
+            )
+        )
+    ).scalars().all()
+    assert withdrawals == []
+
+
+async def test_full_sweep_when_no_cash_is_deployed(session):
+    account = await get_bankroll_account(session)
+    await post_realized_pnl(session, Decimal(60), context={})
+    await session.commit()
+
+    swept = await sweep_profit_if_due(session)
+    await session.commit()
+
+    assert swept == Decimal(60)
+    assert account.balance == Decimal(200)
+    assert account.sweep_pending is False
+
+
+async def test_partial_sweep_completes_when_cash_frees_up(session):
+    account = await get_bankroll_account(session)
+    await post_realized_pnl(session, Decimal(60), context={})
+    await session.commit()
+    position = await _seed_open_position(session, quantity=230, avg_price=1)
+
+    first = await sweep_profit_if_due(session)
+    await session.commit()
+    assert first == Decimal(30)
+    assert account.sweep_pending is True
+
+    # Cash still tied up: nothing more moves, no duplicate withdrawal.
+    assert await sweep_profit_if_due(session) == 0
+
+    # Positions close → the $30 remainder becomes sweepable even though
+    # it never re-crossed the $50 limit on its own.
+    position.quantity = 0
+    position.settled_at = NOW
+    await session.commit()
+
+    second = await sweep_profit_if_due(session)
+    await session.commit()
+    assert second == Decimal(30)
+    assert Decimal(str(account.withdrawn_total)) == Decimal(60)
+    assert account.balance == Decimal(200)
+    assert account.sweep_pending is False
+
+    # Done: no third withdrawal, ever.
+    assert await sweep_profit_if_due(session) == 0
+    withdrawals = (
+        await session.execute(
+            select(BankrollLedgerEntry).where(
+                BankrollLedgerEntry.entry_type == "profit_withdrawal"
+            )
+        )
+    ).scalars().all()
+    assert len(withdrawals) == 2
+
+
+async def test_losses_cancel_a_pending_sweep(session):
+    account = await get_bankroll_account(session)
+    await post_realized_pnl(session, Decimal(60), context={})
+    await session.commit()
+    await _seed_open_position(session, quantity=230, avg_price=1)
+    assert await sweep_profit_if_due(session) == Decimal(30)
+    await session.commit()
+    # Losing streak erases the remaining pile before cash frees up.
+    await post_realized_pnl(session, Decimal(-40), context={})
+    await session.commit()
+    assert await sweep_profit_if_due(session) == 0
+    assert account.sweep_pending is False
+    # New small profit must re-cross the limit — no stale pending sweep.
+    position = (
+        await session.execute(select(Position).where(Position.outcome == "Up"))
+    ).scalar_one()
+    position.quantity = 0
+    position.settled_at = NOW
+    await post_realized_pnl(session, Decimal(10), context={})
+    await session.commit()
+    assert await sweep_profit_if_due(session) == 0
+
+
+# --- Account persistence (API boundary) -----------------------------------------
+
+async def _get_bankroll_with_engine(engine):
+    """GET /bankroll with production-style per-request sessions."""
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def override_get_db():
+        async with maker() as request_session:
+            yield request_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        with TestClient(app) as test_client:
+            return test_client.get("/bankroll")
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.fixture
+async def fresh_engine():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    await engine.dispose()
+
+
+async def test_get_bankroll_persists_account_on_fresh_database(fresh_engine):
+    response = await _get_bankroll_with_engine(fresh_engine)
+    assert response.status_code == 200
+    # Proof of COMMIT, not just flush: a brand-new session must see the row.
+    maker = async_sessionmaker(fresh_engine, expire_on_commit=False)
+    async with maker() as check:
+        count = await check.scalar(select(func.count()).select_from(BankrollAccount))
+    assert count == 1
+
+
+async def test_get_bankroll_second_read_returns_same_persisted_values(fresh_engine):
+    first = (await _get_bankroll_with_engine(fresh_engine)).json()
+    maker = async_sessionmaker(fresh_engine, expire_on_commit=False)
+    async with maker() as write:
+        account = await get_bankroll_account(write)
+        account.realized_pnl_total = Decimal(10)
+        await write.commit()
+
+    second = (await _get_bankroll_with_engine(fresh_engine)).json()
+    third = (await _get_bankroll_with_engine(fresh_engine)).json()
+    assert second == third
+    assert second["starting_bankroll_usd"] == first["starting_bankroll_usd"]
+    assert second["realized_pnl_total_usd"] == 10.0
+
+
+async def test_env_defaults_do_not_reseed_existing_account(fresh_engine, monkeypatch):
+    first = (await _get_bankroll_with_engine(fresh_engine)).json()
+    assert first["starting_bankroll_usd"] == 200.0
+
+    monkeypatch.setenv("POLYCOPY_STARTING_BANKROLL_USD", "999")
+    monkeypatch.setenv("POLYCOPY_PROFIT_LIMIT_USD", "500")
+    get_settings.cache_clear()
+
+    second = (await _get_bankroll_with_engine(fresh_engine)).json()
+    # DB wins over env after creation — no silent reseed or replacement.
+    assert second["starting_bankroll_usd"] == 200.0
+    assert second["profit_limit_usd"] == 50.0
+
+
+async def test_repeated_reads_create_exactly_one_account_row(fresh_engine):
+    for _ in range(3):
+        response = await _get_bankroll_with_engine(fresh_engine)
+        assert response.status_code == 200
+    maker = async_sessionmaker(fresh_engine, expire_on_commit=False)
+    async with maker() as check:
+        count = await check.scalar(select(func.count()).select_from(BankrollAccount))
+    assert count == 1
