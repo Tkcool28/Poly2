@@ -135,10 +135,10 @@ async def _seed_approved_trade(
 
 async def test_account_auto_created_with_settings_defaults(session):
     account = await get_bankroll_account(session)
-    assert Decimal(str(account.starting_bankroll_usd)) == Decimal("200")
-    assert account.balance == Decimal("200")
-    assert Decimal(str(account.profit_limit_usd)) == Decimal("50")
-    assert Decimal(str(account.stop_loss_floor_usd)) == Decimal("100")
+    assert Decimal(str(account.starting_bankroll_usd)) == Decimal(200)
+    assert account.balance == Decimal(200)
+    assert Decimal(str(account.profit_limit_usd)) == Decimal(50)
+    assert Decimal(str(account.stop_loss_floor_usd)) == Decimal(100)
     # get-or-create is stable: same row on repeat calls.
     assert (await get_bankroll_account(session)).id == account.id
 
@@ -160,7 +160,7 @@ async def test_realized_pnl_posts_to_ledger_and_moves_balance(session):
 
 async def test_zero_realized_pnl_writes_no_ledger_noise(session):
     await get_bankroll_account(session)
-    assert await post_realized_pnl(session, Decimal("0"), context={}) is None
+    assert await post_realized_pnl(session, Decimal(0), context={}) is None
     assert (await session.scalar(select(BankrollLedgerEntry.id))) is None
 
 
@@ -169,23 +169,23 @@ async def test_zero_realized_pnl_writes_no_ledger_noise(session):
 
 async def test_sweep_moves_profit_out_and_returns_to_base(session):
     account = await get_bankroll_account(session)
-    await post_realized_pnl(session, Decimal("60"), context={"kind": "settlement"})
+    await post_realized_pnl(session, Decimal(60), context={"kind": "settlement"})
     await session.commit()
 
     swept = await sweep_profit_if_due(session)
     await session.commit()
 
-    assert swept == Decimal("60")
-    assert Decimal(str(account.withdrawn_total)) == Decimal("60")
+    assert swept == Decimal(60)
+    assert Decimal(str(account.withdrawn_total)) == Decimal(60)
     # Bankroll returns to its base after cashing out — profit now "yours".
-    assert account.balance == Decimal("200")
+    assert account.balance == Decimal(200)
     entries = (
         await session.execute(
             select(BankrollLedgerEntry).order_by(BankrollLedgerEntry.id)
         )
     ).scalars().all()
     assert [e.entry_type for e in entries] == ["realized_pnl", "profit_withdrawal"]
-    assert Decimal(str(entries[1].amount)) == Decimal("-60")
+    assert Decimal(str(entries[1].amount)) == Decimal(-60)
     log = (await session.execute(select(DecisionLogEntry))).scalar_one()
     assert log.action == "profit_withdrawn"
     # Not due again until NEW profit accumulates past the limit.
@@ -194,14 +194,14 @@ async def test_sweep_moves_profit_out_and_returns_to_base(session):
 
 async def test_losses_after_sweep_are_never_redeposited(session):
     account = await get_bankroll_account(session)
-    await post_realized_pnl(session, Decimal("60"), context={})
+    await post_realized_pnl(session, Decimal(60), context={})
     await sweep_profit_if_due(session)
     await session.commit()
     # Losing streak after the withdrawal: balance drops, nothing to sweep.
-    await post_realized_pnl(session, Decimal("-3"), context={})
+    await post_realized_pnl(session, Decimal(-3), context={})
     await session.commit()
-    assert account.balance == Decimal("197")
-    assert Decimal(str(account.withdrawn_total)) == Decimal("60")
+    assert account.balance == Decimal(197)
+    assert Decimal(str(account.withdrawn_total)) == Decimal(60)
     assert await sweep_profit_if_due(session) == 0
 
 
@@ -209,21 +209,21 @@ async def test_sweep_disabled_when_limit_zero(session, monkeypatch):
     monkeypatch.setenv("POLYCOPY_PROFIT_LIMIT_USD", "0")
     get_settings.cache_clear()
     account = await get_bankroll_account(session)
-    await post_realized_pnl(session, Decimal("80"), context={})
+    await post_realized_pnl(session, Decimal(80), context={})
     await session.commit()
     assert await sweep_profit_if_due(session) == 0
-    assert account.balance == Decimal("280")
+    assert account.balance == Decimal(280)
 
 
 async def test_sweep_waits_until_limit_reached(session):
     account = await get_bankroll_account(session)  # limit $50
-    await post_realized_pnl(session, Decimal("30"), context={})
+    await post_realized_pnl(session, Decimal(30), context={})
     await session.commit()
     assert await sweep_profit_if_due(session) == 0
-    await post_realized_pnl(session, Decimal("25"), context={})
+    await post_realized_pnl(session, Decimal(25), context={})
     await session.commit()
-    assert await sweep_profit_if_due(session) == Decimal("55")
-    assert account.balance == Decimal("200")
+    assert await sweep_profit_if_due(session) == Decimal(55)
+    assert account.balance == Decimal(200)
 
 
 # --- Execution gates ------------------------------------------------------------
@@ -311,9 +311,9 @@ async def test_stop_loss_floor_halts_new_buys_but_sells_still_run(
     monkeypatch.setenv("POLYCOPY_MAX_EXPOSURE_GLOBAL_USD", "100000")
     get_settings.cache_clear()
     account = await get_bankroll_account(session)  # floor $100
-    await post_realized_pnl(session, Decimal("-105"), context={})
+    await post_realized_pnl(session, Decimal(-105), context={})
     await session.commit()
-    assert account.balance == Decimal("95")
+    assert account.balance == Decimal(95)
     assert stop_loss_hit(account)
 
     # New BUY: halted at the floor — recorded miss.
@@ -394,14 +394,14 @@ async def test_sell_posts_realized_pnl_to_bankroll(session):
 
 async def test_execution_cycle_runs_profit_sweep(session):
     account = await get_bankroll_account(session)
-    await post_realized_pnl(session, Decimal("60"), context={})
+    await post_realized_pnl(session, Decimal(60), context={})
     await session.commit()
 
     async with _make_client() as client:
         await run_execution_cycle(session, client)
 
-    assert Decimal(str(account.withdrawn_total)) == Decimal("60")
-    assert account.balance == Decimal("200")
+    assert Decimal(str(account.withdrawn_total)) == Decimal(60)
+    assert account.balance == Decimal(200)
 
 
 async def test_cycle_stats_shape_unchanged_by_sweep(session, monkeypatch):
@@ -456,8 +456,8 @@ async def test_settings_endpoint_updates_and_writes_decision_log(client, session
     assert body["stop_loss_floor_usd"] == 0
 
     account = await get_bankroll_account(session)
-    assert Decimal(str(account.profit_limit_usd)) == Decimal("25")
-    assert Decimal(str(account.stop_loss_floor_usd)) == Decimal("0")
+    assert Decimal(str(account.profit_limit_usd)) == Decimal(25)
+    assert Decimal(str(account.stop_loss_floor_usd)) == Decimal(0)
 
     logs = (await session.execute(select(DecisionLogEntry))).scalars().all()
     assert any(log.action == "bankroll_settings_updated" for log in logs)
