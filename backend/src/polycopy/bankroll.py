@@ -46,10 +46,15 @@ ZERO = Decimal(0)
 BANKROLL_ACCOUNT_ID = 1
 
 
-async def get_bankroll_account(
+async def get_or_create_bankroll_account(
     session: AsyncSession, *, lock: bool = False
-) -> BankrollAccount:
+) -> tuple[BankrollAccount, bool]:
     """Fetch the singleton account row, creating it from settings once.
+
+    Returns ``(account, created)``. ``created`` is True only when this
+    call inserted the row — flushed, but NOT yet committed. Read-only
+    request paths must commit themselves when ``created`` is True,
+    otherwise the request's session close rolls the new row back.
 
     ``lock=True`` takes a row-level write lock so the bot cycle and a
     concurrent settings change cannot interleave balance mutations
@@ -77,6 +82,20 @@ async def get_bankroll_account(
             profit_limit=str(account.profit_limit_usd),
             stop_loss_floor=str(account.stop_loss_floor_usd),
         )
+        return account, True
+    return account, False
+
+
+async def get_bankroll_account(
+    session: AsyncSession, *, lock: bool = False
+) -> BankrollAccount:
+    """Fetch the singleton account row (see :func:`get_or_create_bankroll_account`).
+
+    Write paths (bot cycle, settings updates) commit their own
+    transactions, so they can ignore the ``created`` flag this wrapper
+    discards. Read-only endpoints must use the tuple form instead.
+    """
+    account, _ = await get_or_create_bankroll_account(session, lock=lock)
     return account
 
 
@@ -136,6 +155,14 @@ async def sweep_profit_if_due(session: AsyncSession) -> Decimal:
     mirroring "cash the profit out, keep trading with the stake".
     Only profit above prior sweeps is ever moved; losses already eaten
     are never re-deposited. Returns the swept amount (0 when not due).
+
+    Cash reality check: a withdrawal can only move money that is not
+    currently deployed in open positions. If free cash covers only part
+    of the pile, the sweep moves what it can and marks the account
+    ``sweep_pending``; a later cycle finishes the withdrawal once
+    positions close and cash frees up — the remainder does NOT have to
+    re-cross the profit limit, and no amount is ever withdrawn twice.
+    Available cash can therefore never go negative.
     """
     account = await get_bankroll_account(session, lock=True)
     if account.profit_limit_usd is None:
@@ -147,15 +174,30 @@ async def sweep_profit_if_due(session: AsyncSession) -> Decimal:
         ZERO,
         Decimal(str(account.realized_pnl_total)) - Decimal(str(account.withdrawn_total)),
     )
-    if unwithdrawn < limit:
+    if unwithdrawn <= ZERO:
+        # Losses ate any leftover pile — the next sweep must re-cross
+        # the limit from scratch.
+        account.sweep_pending = False
         return ZERO
-    account.withdrawn_total = Decimal(str(account.withdrawn_total)) + unwithdrawn
+    # Either the pile just crossed the limit, or an earlier partial sweep
+    # left a remainder waiting for cash to free up.
+    if not account.sweep_pending and unwithdrawn < limit:
+        return ZERO
+    free_cash = max(ZERO, account.balance - await open_position_cost(session))
+    amount = min(unwithdrawn, free_cash)
+    if amount <= ZERO:
+        return ZERO
+    account.sweep_pending = amount < unwithdrawn
+    account.withdrawn_total = Decimal(str(account.withdrawn_total)) + amount
     session.add(
         BankrollLedgerEntry(
             entry_type=LEDGER_PROFIT_WITHDRAWAL,
-            amount=-unwithdrawn,
+            amount=-amount,
             balance_after=account.balance,
-            context={"profit_limit_usd": str(limit)},
+            context={
+                "profit_limit_usd": str(limit),
+                "partial": bool(account.sweep_pending),
+            },
         )
     )
     session.add(
@@ -163,14 +205,20 @@ async def sweep_profit_if_due(session: AsyncSession) -> Decimal:
             actor="bot",
             action="profit_withdrawn",
             context={
-                "amount": str(unwithdrawn),
+                "amount": str(amount),
                 "profit_limit_usd": str(limit),
+                "partial": bool(account.sweep_pending),
                 "balance_after": str(account.balance),
             },
         )
     )
-    logger.info("profit_swept", amount=str(unwithdrawn), balance=str(account.balance))
-    return unwithdrawn
+    logger.info(
+        "profit_swept",
+        amount=str(amount),
+        balance=str(account.balance),
+        partial=account.sweep_pending,
+    )
+    return amount
 
 
 async def bankroll_view(session: AsyncSession, account: BankrollAccount) -> dict:

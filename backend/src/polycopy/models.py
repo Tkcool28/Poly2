@@ -354,6 +354,10 @@ class BankrollAccount(Base):
     # 0 = feature disabled.
     profit_limit_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
     stop_loss_floor_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    # True while a partial sweep left un-withdrawn profit waiting for cash
+    # to free up; lets a later cycle finish the withdrawal without needing
+    # the remainder to re-cross the profit limit.
+    sweep_pending: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow
