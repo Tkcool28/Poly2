@@ -17,7 +17,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from polycopy.bankroll import bankroll_view, get_bankroll_account
+from polycopy.bankroll import bankroll_view, get_or_create_bankroll_account
 from polycopy.db import get_db
 from polycopy.ingestion.client import PolymarketClient
 from polycopy.models import (
@@ -274,7 +274,7 @@ async def update_bankroll_settings(
     control real behavior, so their history is auditable like everything
     else a human touches.
     """
-    account = await get_bankroll_account(db, lock=True)
+    account, created = await get_or_create_bankroll_account(db, lock=True)
     changed: dict[str, str] = {}
     if body.profit_limit_usd is not None:
         account.profit_limit_usd = body.profit_limit_usd
@@ -290,6 +290,9 @@ async def update_bankroll_settings(
                 context=changed,
             )
         )
+    if changed or created:
+        # Also commit when this request lazily created the account —
+        # otherwise a settings no-op would roll back the new row.
         await db.commit()
     return await bankroll_view(db, account)
 

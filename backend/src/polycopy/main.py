@@ -12,7 +12,7 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.api.routes import router as api_router
-from polycopy.bankroll import bankroll_view, get_bankroll_account
+from polycopy.bankroll import bankroll_view, get_or_create_bankroll_account
 from polycopy.config import Settings, get_settings
 from polycopy.db import dispose_engine, get_db
 from polycopy.logging_config import configure_logging, get_logger
@@ -464,7 +464,13 @@ async def bankroll_overview(db: AsyncSession = Depends(get_db)) -> dict:
     Lazily creates the singleton account from config on first call, so
     this endpoint never 404s on a fresh deploy.
     """
-    account = await get_bankroll_account(db)
+    account, created = await get_or_create_bankroll_account(db)
+    if created:
+        # First-ever read on a fresh DB: make the lazily created
+        # singleton durable. The session dependency only closes — it
+        # never commits — so without this the row would roll back at
+        # the end of a read-only request.
+        await db.commit()
     return await bankroll_view(db, account)
 
 
