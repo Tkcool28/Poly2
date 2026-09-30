@@ -325,3 +325,72 @@ class ServiceHeartbeat(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     service: Mapped[str] = mapped_column(String(40), index=True)
     seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class BankrollAccount(Base):
+    """Singleton row (id == 1): the paper bot's cash state.
+
+    The bot is *aware* of a fixed starting bankroll. Realized paper P&L
+    moves the balance up or down; profit sweeps move accumulated profit
+    OUT to the "withdrawn" bucket, simulating a live-money bot pulling
+    profits to a real account. Balance is always DERIVED
+    (starting + realized − withdrawn) so the account and its ledger can
+    never disagree.
+
+    There is deliberately NO refill/deposit path: a drawdown is a
+    drawdown. Whatever logic runs on paper is exactly what would run
+    live — the bot never assumes fresh money is coming.
+    """
+
+    __tablename__ = "bankroll_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    starting_bankroll_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6))
+    # Lifetime realized paper P&L (SELLs + settlements); losses negative.
+    realized_pnl_total: Mapped[Decimal] = mapped_column(Numeric(24, 6), default=0)
+    # Profit swept out to "your account", lifetime.
+    withdrawn_total: Mapped[Decimal] = mapped_column(Numeric(24, 6), default=0)
+    # Operator-adjustable from the app (DB wins over env after creation).
+    # 0 = feature disabled.
+    profit_limit_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    stop_loss_floor_usd: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    # True while a partial sweep left un-withdrawn profit waiting for cash
+    # to free up; lets a later cycle finish the withdrawal without needing
+    # the remainder to re-cross the profit limit.
+    sweep_pending: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+
+    @property
+    def balance(self) -> Decimal:
+        """Derived cash balance — never stored, never diverges."""
+        return (
+            Decimal(str(self.starting_bankroll_usd))
+            + Decimal(str(self.realized_pnl_total))
+            - Decimal(str(self.withdrawn_total))
+        )
+
+
+class BankrollLedgerEntry(Base):
+    """Append-only movement log — the bankroll's "account statement".
+
+    entry_type:
+    * ``realized_pnl`` — signed delta from a paper SELL or a market
+      settlement (losses negative).
+    * ``profit_withdrawal`` — negative amount swept out once accumulated
+      profit reaches the profit limit (simulated transfer to your account).
+
+    Rows are never updated or deleted; ``balance_after`` is the derived
+    balance at the moment of the entry, cached for cheap rendering.
+    """
+
+    __tablename__ = "bankroll_ledger"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entry_type: Mapped[str] = mapped_column(String(24), index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 6))  # signed
+    balance_after: Mapped[Decimal] = mapped_column(Numeric(20, 6))
+    context: Mapped[dict | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

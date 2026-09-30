@@ -247,7 +247,6 @@ def test_canonical_identity_migration_downgrade_upgrade_round_trip(
     get_settings.cache_clear()
 
 
-
 async def _column_info(db_url: str, table: str, column: str):
     conn = await asyncpg.connect(_dsn(db_url))
     try:
@@ -290,4 +289,44 @@ def test_90d_profitability_migration_round_trip(monkeypatch: pytest.MonkeyPatch)
         assert info["numeric_precision"] == 24
         assert info["numeric_scale"] == 6
 
+    get_settings.cache_clear()
+
+
+
+def test_bankroll_migration_creates_sweep_pending_column(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Alembic head must match BankrollAccount.sweep_pending on PostgreSQL."""
+    db_url = os.environ.get("POLYCOPY_TEST_POSTGRES_URL")
+    if not db_url:
+        pytest.skip("requires POLYCOPY_TEST_POSTGRES_URL")
+
+    cfg = _cfg(db_url, monkeypatch)
+    command.downgrade(cfg, "base")
+    command.upgrade(cfg, "head")
+
+    async def verify() -> None:
+        conn = await asyncpg.connect(_dsn(db_url))
+        try:
+            row = await conn.fetchrow(
+                "SELECT data_type, is_nullable, column_default "
+                "FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name='bankroll_accounts' "
+                "AND column_name='sweep_pending'"
+            )
+            assert row is not None
+            assert row["data_type"] == "boolean"
+            assert row["is_nullable"] == "NO"
+            assert row["column_default"] is not None
+            assert await conn.fetchval(
+                "INSERT INTO bankroll_accounts "
+                "(id, starting_bankroll_usd, realized_pnl_total, withdrawn_total, "
+                "profit_limit_usd, stop_loss_floor_usd, created_at, updated_at) "
+                "VALUES (1, 200, 0, 0, 50, 100, now(), now()) "
+                "RETURNING sweep_pending"
+            ) is False
+        finally:
+            await conn.close()
+
+    asyncio.run(verify())
     get_settings.cache_clear()

@@ -18,6 +18,7 @@ export default function Overview() {
   const queue = useApi(api.approvalQueue, 30000);
   const health = useApi(api.healthDeps, 60000);
   const evidence = useApi(api.paperEvidence, 60000);
+  const bankroll = useApi(api.bankroll, 30000);
 
   const totals = positions.data?.totals;
   const following =
@@ -50,6 +51,35 @@ export default function Overview() {
           Not real money — this is what copying would have made or lost.
         </div>
       </div>
+
+      {/* Bankroll snapshot */}
+      {bankroll.data && (
+        <Link
+          to="/bankroll"
+          className="mt-3 flex items-center justify-between rounded-xl bg-gray-900 p-4"
+        >
+          <div>
+            <div className="text-xs text-gray-400">Practice bankroll</div>
+            <div
+              className={`text-2xl font-bold ${
+                bankroll.data.bankroll_balance_usd <
+                bankroll.data.starting_bankroll_usd
+                  ? "text-red-400"
+                  : "text-green-400"
+              }`}
+            >
+              {fmtUsd(bankroll.data.bankroll_balance_usd)}
+            </div>
+          </div>
+          <div className="text-right text-xs text-gray-400">
+            <div>{fmtUsd(bankroll.data.withdrawn_total_usd)} withdrawn</div>
+            <div>
+              {fmtUsd(bankroll.data.unwithdrawn_profit_usd)} unbanked profit
+            </div>
+            <div className="mt-1 text-gray-600">› manage</div>
+          </div>
+        </Link>
+      )}
 
       {evidence.data && evidence.data.items.length > 0 && (
         <div className="mt-4 space-y-2">

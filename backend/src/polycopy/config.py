@@ -76,6 +76,19 @@ class Settings(BaseSettings):
     # worth fees + slippage — docs/wallet-intelligence.md §5).
     max_copy_price: float = 0.90
 
+    # --- Paper bankroll ---------------------------------------------------
+    # The bot's fixed stake. ``starting_bankroll_usd`` seeds the singleton
+    # account row on first use; after that the DB row is the source of
+    # truth and the limits below are adjustable from the app.
+    # There is intentionally NO refill knob: a drawdown is a drawdown.
+    starting_bankroll_usd: float = 200.0
+    # Accumulated un-withdrawn profit at/above this amount is swept out of
+    # the bankroll (simulated transfer to your real account). 0 disables.
+    profit_limit_usd: float = 50.0
+    # At/below this balance the bot stops opening NEW positions; existing
+    # positions still sell and settle. 0 disables the halt.
+    stop_loss_floor_usd: float = 100.0
+
     # --- Ingestion bounds (Chunk 2; defined now so nobody forgets) -------
     # One newest page per wallet per cycle; approved wallets have a separate,
     # persisted, per-cycle bounded continuity recovery when the anchor is lost.

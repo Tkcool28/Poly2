@@ -14,6 +14,11 @@ Flow (docs/paper-execution-model.md):
 3. ``settle_paper_positions`` — positions still open when their market
    resolves realize at $1 (winner) / $0 (loser), exactly once.
 
+Bankroll (feat/paper-bankroll): every realized P&L event also posts to
+append-only bankroll ledger; BUYs must fit in available cash; a
+stop-loss floor halts new BUYs; profit sweeps run at the end of each
+cycle.
+
 Safety invariants (PR #7 hardening):
 
 * Paper-only: execution fails closed unless runtime is valid paper mode.
@@ -37,6 +42,12 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from polycopy.bankroll import (
+    get_bankroll_account,
+    post_realized_pnl,
+    stop_loss_hit,
+    sweep_profit_if_due,
+)
 from polycopy.config import get_settings
 from polycopy.execution.bookwalk import BookLevel, walk_book
 from polycopy.execution.fees import FEE_SOURCE, MarketFee
@@ -303,6 +314,7 @@ async def execute_signal(
 
     # Exposure caps (BUYs only — a SELL reduces exposure). Exposure is
     # priced at cost basis: sum(quantity × avg_price) across positions.
+    cash: Decimal | None = None
     if signal.side == "BUY":
         positions = (await session.execute(select(Position))).scalars().all()
         global_exp = sum(
@@ -319,6 +331,23 @@ async def execute_signal(
             or market_exp + size_usd > Decimal(str(settings.max_exposure_per_market_usd))
         ):
             order = await _record_skip(session, signal, reason="exposure_cap",
+                                       now=now, order_kwargs={})
+            await session.commit()
+            return order
+
+        # --- Bankroll awareness (BUYs only — a SELL returns cash) --------
+        # The bot knows its cash: balance minus everything already deployed.
+        # Stop-loss floor halts NEW buys (sells/settlements still run);
+        # dead-zero cash refuses buys outright. Both are recorded misses.
+        account = await get_bankroll_account(session, lock=True)
+        if stop_loss_hit(account):
+            order = await _record_skip(session, signal, reason="bankroll_stop_loss",
+                                       now=now, order_kwargs={})
+            await session.commit()
+            return order
+        cash = account.balance - global_exp
+        if cash <= 0:
+            order = await _record_skip(session, signal, reason="bankroll_insufficient",
                                        now=now, order_kwargs={})
             await session.commit()
             return order
@@ -376,6 +405,23 @@ async def execute_signal(
     ):
         order = await _record_skip(
             session, signal, reason="exposure_cap", now=now,
+            order_kwargs={"book_snapshot": snapshot,
+                          "book_depth_shares": result.depth_available,
+                          "levels_consumed": result.levels_consumed},
+        )
+        await session.commit()
+        return order
+
+    # Bankroll cash check on the EXACT fill (notional + fee), not the
+    # $10 request — a partial that fits where a full fill would not must
+    # still be allowed.
+    if (
+        signal.side == "BUY"
+        and cash is not None
+        and result.filled_size * result.fill_price + fee > cash
+    ):
+        order = await _record_skip(
+            session, signal, reason="bankroll_insufficient", now=now,
             order_kwargs={"book_snapshot": snapshot,
                           "book_depth_shares": result.depth_available,
                           "levels_consumed": result.levels_consumed},
@@ -448,6 +494,19 @@ async def execute_signal(
         order.realized_pnl_delta = sell_qty * (result.fill_price - avg) - fee
         position.realized_pnl = Decimal(str(position.realized_pnl)) + order.realized_pnl_delta
         position.quantity = qty - sell_qty
+        # The bankroll feels every realized exit, win or loss — the same
+        # movement a live account would show.
+        await post_realized_pnl(
+            session,
+            order.realized_pnl_delta,
+            context={
+                "kind": "paper_sell",
+                "signal_id": signal.id,
+                "source_trade_id": signal.source_trade_id,
+                "market_id": signal.market_id,
+                "outcome": signal.outcome,
+            },
+        )
 
     session.add(
         DecisionLogEntry(
@@ -509,6 +568,19 @@ async def settle_paper_positions(
         position.settled_at = now
         stats["settled"] += 1
         stats["winners" if won else "losers"] += 1
+        # Settlement is a bankroll event too: winners pay in, losers don't.
+        await post_realized_pnl(
+            session,
+            position.settlement_realized_pnl,
+            context={
+                "kind": "settlement",
+                "position_id": position.id,
+                "wallet_id": position.wallet_id,
+                "market_id": position.market_id,
+                "outcome": position.outcome,
+                "winning_outcome": settlement.winning_outcome,
+            },
+        )
         session.add(
             DecisionLogEntry(
                 actor="bot",
@@ -606,4 +678,11 @@ async def run_execution_cycle(
                 stats["stale"] = stats.get("stale", 0) + 1
     if stats["deferred"]:
         await session.commit()  # one durable count write per bounded batch
+    # Profit sweep runs after every fill/settlement in the cycle so it
+    # judges the freshest balance. Deliberately NOT part of the stats dict
+    # (its shape is a stable contract); the sweep writes its own ledger
+    # entry and decision-log row when it fires.
+    swept = await sweep_profit_if_due(session)
+    if swept > 0:
+        await session.commit()
     return stats

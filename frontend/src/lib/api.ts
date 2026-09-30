@@ -87,6 +87,28 @@ export interface PositionsResponse {
   };
 }
 
+export interface BankrollOverview {
+  starting_bankroll_usd: number;
+  bankroll_balance_usd: number;
+  realized_pnl_total_usd: number;
+  withdrawn_total_usd: number;
+  unwithdrawn_profit_usd: number;
+  profit_limit_usd: number | null;
+  stop_loss_floor_usd: number | null;
+  open_cost_usd: number;
+  available_cash_usd: number;
+  stop_loss_hit: boolean;
+}
+
+export interface BankrollLedgerItem {
+  id: number;
+  entry_type: string;
+  amount: number;
+  balance_after: number;
+  context: Record<string, unknown> | null;
+  created_at: string | null;
+}
+
 export interface WalletPaperEvidence {
   wallet_id: number;
   wallet: string;
@@ -141,6 +163,13 @@ export const api = {
   wallets: () => request<{ items: WalletItem[]; count: number }>("/wallets"),
   signals: () => request<{ items: SignalItem[]; count: number }>("/signals"),
   positions: () => request<PositionsResponse>("/positions"),
+  bankroll: () => request<BankrollOverview>("/bankroll"),
+  bankrollLedger: () =>
+    request<{ items: BankrollLedgerItem[]; count: number }>("/bankroll/ledger"),
+  updateBankrollSettings: (settings: {
+    profit_limit_usd?: number;
+    stop_loss_floor_usd?: number;
+  }) => request<BankrollOverview>("/bankroll/settings", "POST", settings),
   paperEvidence: () => request<{ items: WalletPaperEvidence[]; count: number }>("/paper/evidence"),
   approvalQueue: () =>
     request<{ items: ApprovalItem[]; count: number }>("/approval-queue"),
@@ -289,6 +318,10 @@ export function missReasonText(reason: string | null): string {
       return "This wallet was no longer approved when the trade ran.";
     case "stale_signal":
       return "Observed too late for a realistic paper copy; no book was requested.";
+    case "bankroll_insufficient":
+      return "Not enough free cash left in the practice bankroll for this order.";
+    case "bankroll_stop_loss":
+      return "Practice bankroll is at its stop-loss floor — no new positions for now.";
     default:
       return reason ? `Reason: ${reason}` : "Unknown reason.";
   }
