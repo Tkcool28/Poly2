@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 os.environ.setdefault("POLYCOPY_ENVIRONMENT", "test")
 
-import polycopy.execution.service as execution_service
 from polycopy.bankroll import (
     get_bankroll_account,
     post_realized_pnl,
@@ -23,7 +22,11 @@ from polycopy.bankroll import (
 )
 from polycopy.config import get_settings
 from polycopy.db import get_db
-from polycopy.execution.service import detect_signals, execute_signal, run_execution_cycle
+from polycopy.execution.service import (
+    detect_signals,
+    execute_signal,
+    run_execution_cycle,
+)
 from polycopy.ingestion.client import PolymarketClient
 from polycopy.main import app
 from polycopy.models import (
@@ -158,9 +161,7 @@ async def test_realized_pnl_posts_to_ledger_and_moves_balance(session):
 async def test_zero_realized_pnl_writes_no_ledger_noise(session):
     await get_bankroll_account(session)
     assert await post_realized_pnl(session, Decimal("0"), context={}) is None
-    assert (
-        await session.scalar(select(BankrollLedgerEntry.id))
-    ) is None
+    assert (await session.scalar(select(BankrollLedgerEntry.id))) is None
 
 
 # --- Profit sweep -------------------------------------------------------------
@@ -179,7 +180,9 @@ async def test_sweep_moves_profit_out_and_returns_to_base(session):
     # Bankroll returns to its base after cashing out — profit now "yours".
     assert account.balance == Decimal("200")
     entries = (
-        await session.execute(select(BankrollLedgerEntry).order_by(BankrollLedgerEntry.id))
+        await session.execute(
+            select(BankrollLedgerEntry).order_by(BankrollLedgerEntry.id)
+        )
     ).scalars().all()
     assert [e.entry_type for e in entries] == ["realized_pnl", "profit_withdrawal"]
     assert Decimal(str(entries[1].amount)) == Decimal("-60")
@@ -282,9 +285,7 @@ async def test_partial_fill_fits_where_full_fill_would_not(session, monkeypatch)
     trade2 = await _seed_approved_trade(session, address="0xsmart2")
     await detect_signals(session, now=NOW)
     signal2 = (
-        await session.execute(
-            select(Signal).where(Signal.wallet_id == trade2.wallet_id)
-        )
+        await session.execute(select(Signal).where(Signal.wallet_id == trade2.wallet_id))
     ).scalar_one()
     session.add(
         Position(
@@ -304,7 +305,9 @@ async def test_partial_fill_fits_where_full_fill_would_not(session, monkeypatch)
     assert order2.miss_reason == "bankroll_insufficient"
 
 
-async def test_stop_loss_floor_halts_new_buys_but_sells_still_run(session, monkeypatch):
+async def test_stop_loss_floor_halts_new_buys_but_sells_still_run(
+    session, monkeypatch
+):
     monkeypatch.setenv("POLYCOPY_MAX_EXPOSURE_GLOBAL_USD", "100000")
     get_settings.cache_clear()
     account = await get_bankroll_account(session)  # floor $100
@@ -313,7 +316,7 @@ async def test_stop_loss_floor_halts_new_buys_but_sells_still_run(session, monke
     assert account.balance == Decimal("95")
     assert stop_loss_hit(account)
 
-    # New BUY: halted — no book interaction would help, recorded miss.
+    # New BUY: halted at the floor — recorded miss.
     await _seed_approved_trade(session, address="0xhalt")
     await detect_signals(session, now=NOW)
     buy_signal = (await session.execute(select(Signal))).scalar_one()
@@ -333,9 +336,7 @@ async def test_stop_loss_floor_halts_new_buys_but_sells_still_run(session, monke
     await session.commit()
     await detect_signals(session, now=NOW)
     sell_signal = (
-        await session.execute(
-            select(Signal).where(Signal.side == "SELL")
-        )
+        await session.execute(select(Signal).where(Signal.side == "SELL"))
     ).scalar_one()
     session.add(
         Position(
@@ -353,14 +354,14 @@ async def test_stop_loss_floor_halts_new_buys_but_sells_still_run(session, monke
 
     assert sell_order.status == "filled"
     # SELL realized P&L reached the bankroll ledger anyway.
-    entry = (
+    entries = (
         await session.execute(
             select(BankrollLedgerEntry).where(
                 BankrollLedgerEntry.entry_type == "realized_pnl"
             )
         )
-    ).scalars().all()[-1]
-    assert Decimal(str(entry.amount)) > 0
+    ).scalars().all()
+    assert Decimal(str(entries[-1].amount)) > 0
 
 
 async def test_sell_posts_realized_pnl_to_bankroll(session):
