@@ -32,12 +32,6 @@ def upgrade() -> None:
         sa.Column("withdrawn_total", sa.Numeric(24, 6), nullable=False, server_default="0"),
         sa.Column("profit_limit_usd", sa.Numeric(20, 6), nullable=True),
         sa.Column("stop_loss_floor_usd", sa.Numeric(20, 6), nullable=True),
-        sa.Column(
-            "sweep_pending",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.false(),
-        ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
     )
