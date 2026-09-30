@@ -12,9 +12,9 @@ from pathlib import Path
 
 import asyncpg
 import pytest
+from alembic import command
 from alembic.config import Config
 
-from alembic import command
 from polycopy.config import get_settings
 
 BACKEND = Path(__file__).resolve().parent.parent
@@ -245,7 +245,6 @@ def test_canonical_identity_migration_downgrade_upgrade_round_trip(
         None,
     )
     get_settings.cache_clear()
-
 
 
 async def _column_info(db_url: str, table: str, column: str):
