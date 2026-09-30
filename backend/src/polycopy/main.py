@@ -12,10 +12,12 @@ from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polycopy.api.routes import router as api_router
+from polycopy.bankroll import bankroll_view, get_bankroll_account
 from polycopy.config import Settings, get_settings
 from polycopy.db import dispose_engine, get_db
 from polycopy.logging_config import configure_logging, get_logger
 from polycopy.models import (
+    BankrollLedgerEntry,
     Market,
     PaperOrder,
     Position,
@@ -452,4 +454,41 @@ async def list_positions(db: AsyncSession = Depends(get_db)) -> dict:
             "realized_pnl_usd": float(totals_row[2]),
             "settled_count": int(totals_row[3]),
         },
+    }
+
+
+@app.get("/bankroll")
+async def bankroll_overview(db: AsyncSession = Depends(get_db)) -> dict:
+    """Bankroll state for the dashboard: balance, limits, available cash.
+
+    Lazily creates the singleton account from config on first call, so
+    this endpoint never 404s on a fresh deploy.
+    """
+    account = await get_bankroll_account(db)
+    return await bankroll_view(db, account)
+
+
+@app.get("/bankroll/ledger")
+async def bankroll_ledger(db: AsyncSession = Depends(get_db)) -> dict:
+    """Recent bankroll movements, newest first — the account statement."""
+    rows = (
+        await db.execute(
+            select(BankrollLedgerEntry)
+            .order_by(BankrollLedgerEntry.id.desc())
+            .limit(100)
+        )
+    ).scalars().all()
+    return {
+        "items": [
+            {
+                "id": e.id,
+                "entry_type": e.entry_type,
+                "amount": float(e.amount),
+                "balance_after": float(e.balance_after),
+                "context": e.context,
+                "created_at": _iso(e.created_at),
+            }
+            for e in rows
+        ],
+        "count": len(rows),
     }

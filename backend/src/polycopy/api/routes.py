@@ -17,6 +17,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from polycopy.bankroll import bankroll_view, get_bankroll_account
 from polycopy.db import get_db
 from polycopy.ingestion.client import PolymarketClient
 from polycopy.models import (
@@ -37,6 +38,14 @@ class WalletCreateIn(BaseModel):
 
     address: str = Field(pattern=_WALLET_ADDRESS_PATTERN)
     label: str | None = Field(default=None, max_length=120)
+
+
+class BankrollSettingsIn(BaseModel):
+    """Operator-adjustable bankroll controls. 0 disables a limit."""
+
+    profit_limit_usd: float | None = Field(default=None, ge=0)
+    stop_loss_floor_usd: float | None = Field(default=None, ge=0)
+
 
 _ALLOWED_TRANSITIONS = {
     "approve": ("pending_review", "approved"),
@@ -252,6 +261,37 @@ async def get_wallet_catch_up(wallet_id: int, db: AsyncSession = Depends(get_db)
     )).scalar_one_or_none()
     return {"wallet_id": wallet_id, "approval_state": wallet.approval_state,
             "status": latest.context if latest else None}
+
+
+@router.post("/bankroll/settings")
+async def update_bankroll_settings(
+    body: BankrollSettingsIn, db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Operator-adjustable bankroll controls (0 disables a limit).
+
+    Only fields present in the request body are changed (omitted = keep
+    current). Every change is written to the decision log — these knobs
+    control real behavior, so their history is auditable like everything
+    else a human touches.
+    """
+    account = await get_bankroll_account(db, lock=True)
+    changed: dict[str, str] = {}
+    if body.profit_limit_usd is not None:
+        account.profit_limit_usd = body.profit_limit_usd
+        changed["profit_limit_usd"] = str(body.profit_limit_usd)
+    if body.stop_loss_floor_usd is not None:
+        account.stop_loss_floor_usd = body.stop_loss_floor_usd
+        changed["stop_loss_floor_usd"] = str(body.stop_loss_floor_usd)
+    if changed:
+        db.add(
+            DecisionLogEntry(
+                actor="human:api",
+                action="bankroll_settings_updated",
+                context=changed,
+            )
+        )
+        await db.commit()
+    return await bankroll_view(db, account)
 
 
 @router.get("/approval-queue")
