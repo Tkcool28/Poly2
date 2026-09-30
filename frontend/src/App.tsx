@@ -1,6 +1,7 @@
 import { Route, Routes } from "react-router-dom";
 import Layout from "./components/Layout";
 import Approvals from "./pages/Approvals";
+import Bankroll from "./pages/Bankroll";
 import Overview from "./pages/Overview";
 import Portfolio from "./pages/Portfolio";
 import Signals from "./pages/Signals";
@@ -14,6 +15,7 @@ export default function App() {
         <Route path="/wallets" element={<Wallets />} />
         <Route path="/signals" element={<Signals />} />
         <Route path="/portfolio" element={<Portfolio />} />
+        <Route path="/bankroll" element={<Bankroll />} />
         <Route path="/approvals" element={<Approvals />} />
       </Route>
     </Routes>

@@ -23,6 +23,11 @@ const TABS = [
     icon: "M4 7h16v13H4zM8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2",
   },
   {
+    to: "/bankroll",
+    label: "Bankroll",
+    icon: "M2 7h20v10H2zM12 10.6a1.4 1.4 0 1 0 0 2.8 1.4 1.4 0 0 0 0-2.8ZM5.5 9.5v5M18.5 9.5v5",
+  },
+  {
     to: "/wallets",
     label: "Wallets",
     icon: "M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0ZM4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1",
