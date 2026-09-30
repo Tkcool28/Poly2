@@ -80,10 +80,6 @@ async def get_bankroll_account(
     return account
 
 
-def account_balance(account: BankrollAccount) -> Decimal:
-    return account.balance
-
-
 async def open_position_cost(session: AsyncSession) -> Decimal:
     """Cost basis (qty × avg_price) of all open paper positions."""
     total = await session.scalar(
