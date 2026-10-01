@@ -58,7 +58,7 @@ export default function Wallets() {
   async function disable(id: number, address: string) {
     if (
       !window.confirm(
-        `Stop following ${shortAddr(address)}? The bot will no longer copy their trades. You can't undo this from the app.`,
+        `Stop following ${shortAddr(address)}? The bot will no longer copy their trades. You can follow it again later; only trades after that new approval will be copied.`,
       )
     ) {
       return;
