@@ -180,8 +180,10 @@ export const api = {
       label: string | null;
       approval_state: string;
     }>("/wallets", "POST", { address, label: label || null }),
-  walletAction: (walletId: number, action: "approve" | "reject" | "disable") =>
-    request<{ wallet_id: number; approval_state: string }>(
+  walletAction: (
+    walletId: number,
+    action: "approve" | "reject" | "disable" | "reenable",
+  ) => request<{ wallet_id: number; approval_state: string }>(
       `/wallets/${walletId}/${action}`,
       "POST",
     ),

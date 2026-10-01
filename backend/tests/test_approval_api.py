@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -127,6 +128,36 @@ async def test_disable_requires_approved(client, session):
     assert resp.status_code == 200
     await session.refresh(wallet)
     assert wallet.approval_state == "disabled"
+
+
+async def test_reenable_disabled_wallet_resets_copy_boundary(client, session):
+    old_boundary = datetime.now(UTC) - timedelta(days=1)
+    wallet = Wallet(
+        address="0xreenable",
+        approval_state="approved",
+        approved_at=old_boundary,
+    )
+    session.add(wallet)
+    await session.commit()
+
+    assert client.post(f"/wallets/{wallet.id}/disable").status_code == 200
+    resp = client.post(f"/wallets/{wallet.id}/reenable")
+
+    assert resp.status_code == 200
+    assert resp.json()["approval_state"] == "approved"
+    await session.refresh(wallet)
+    assert wallet.approval_state == "approved"
+    assert wallet.approved_at is not None
+    assert wallet.approved_at.replace(tzinfo=UTC) > old_boundary
+    logs = (await session.execute(select(DecisionLogEntry))).scalars().all()
+    assert any(log.action == "wallet_reenabled" for log in logs)
+
+
+async def test_reenable_requires_disabled(client, session):
+    wallet = await _queue_wallet(session, address="0xnotdisabled")
+    resp = client.post(f"/wallets/{wallet.id}/reenable")
+    assert resp.status_code == 409
+    assert "disabled" in resp.json()["detail"]
 
 
 async def test_unknown_action_and_wallet(client, session):

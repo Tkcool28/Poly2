@@ -72,6 +72,23 @@ export default function Wallets() {
     }
   }
 
+  async function reenable(id: number, address: string) {
+    if (
+      !window.confirm(
+        `Follow ${shortAddr(address)} again? Only trades made after you re-enable it will be copied.`,
+      )
+    ) {
+      return;
+    }
+    setActionError(null);
+    try {
+      await api.walletAction(id, "reenable");
+      refresh();
+    } catch (e) {
+      setActionError(`Couldn't resume following that wallet. (${e})`);
+    }
+  }
+
   return (
     <PageShell
       title="Wallets"
@@ -185,6 +202,14 @@ export default function Wallets() {
                     className="mt-3 min-h-[44px] w-full rounded-lg border border-gray-700 text-sm text-gray-300 active:bg-gray-800"
                   >
                     Stop following
+                  </button>
+                )}
+                {w.approval_state === "disabled" && (
+                  <button
+                    onClick={() => reenable(w.id, w.address)}
+                    className="mt-3 min-h-[44px] w-full rounded-lg border border-emerald-700 text-sm text-emerald-300 active:bg-emerald-950"
+                  >
+                    Follow again
                   </button>
                 )}
               </div>
