@@ -25,7 +25,7 @@ def _percentile(values: list[float], fraction: float) -> float | None:
 
 
 async def wallet_paper_evidence(session: AsyncSession, wallet: Wallet) -> dict:
-    """Lifetime counts with an explicitly capped distribution sample."""
+    """Lifetime history plus a comparable current-approval-period copy rate."""
     source_count = int(await session.scalar(
         select(func.count(Trade.id)).where(Trade.wallet_id == wallet.id)
     ) or 0)
@@ -41,10 +41,6 @@ async def wallet_paper_evidence(session: AsyncSession, wallet: Wallet) -> dict:
     signal_count = int(await session.scalar(
         select(func.count(Signal.id)).where(Signal.wallet_id == wallet.id)
     ) or 0)
-    deferrals = int(await session.scalar(
-        select(func.coalesce(func.sum(Signal.kill_switch_deferrals), 0))
-        .where(Signal.wallet_id == wallet.id)
-    ) or 0)
     order_rows = (await session.execute(
         select(PaperOrder.status, PaperOrder.miss_reason, func.count(PaperOrder.id))
         .where(PaperOrder.wallet_id == wallet.id)
@@ -56,12 +52,52 @@ async def wallet_paper_evidence(session: AsyncSession, wallet: Wallet) -> dict:
     reasons = {reason or "unspecified": count for status, reason, count in order_rows
                if status == "missed"}
 
-    sample = (await session.execute(
+    # The latest approved_at begins a new copy period.  Every numerator used
+    # for the public copy rate must be scoped to the same interval as its
+    # eligible-source-trade denominator; historical paper activity remains
+    # available under explicit lifetime fields below.
+    current_signal_filters = [Signal.wallet_id == wallet.id]
+    if boundary is not None:
+        current_signal_filters.extend([
+            Signal.t0_traded_at >= boundary,
+            Signal.t1_detected_at >= boundary,
+        ])
+        current_signal_count = int(await session.scalar(
+            select(func.count(Signal.id)).where(*current_signal_filters)
+        ) or 0)
+        current_deferrals = int(await session.scalar(
+            select(func.coalesce(func.sum(Signal.kill_switch_deferrals), 0))
+            .where(*current_signal_filters)
+        ) or 0)
+        current_order_rows = (await session.execute(
+            select(PaperOrder.status, PaperOrder.miss_reason, func.count(PaperOrder.id))
+            .join(Signal, PaperOrder.signal_id == Signal.id)
+            .where(*current_signal_filters)
+            .group_by(PaperOrder.status, PaperOrder.miss_reason)
+        )).all()
+    else:
+        current_signal_count = current_deferrals = 0
+        current_order_rows = []
+    current_copied = sum(
+        count for status, _, count in current_order_rows if status in ("filled", "partial")
+    )
+    current_partial = sum(count for status, _, count in current_order_rows if status == "partial")
+    current_misses = sum(count for status, _, count in current_order_rows if status == "missed")
+    current_reasons = {
+        reason or "unspecified": count for status, reason, count in current_order_rows
+        if status == "missed"
+    }
+
+    sample_query = (
         select(Signal, PaperOrder)
         .outerjoin(PaperOrder, PaperOrder.signal_id == Signal.id)
-        .where(Signal.wallet_id == wallet.id)
+        .where(*current_signal_filters)
         .order_by(Signal.id.desc()).limit(5000)
-    )).all()
+    )
+    if boundary is None:
+        sample = []
+    else:
+        sample = (await session.execute(sample_query)).all()
     lags = [max(0.0, (_aware(s.t1_detected_at) - _aware(s.t0_traded_at)).total_seconds())
             for s, _ in sample]
     adverse_slippage = [
@@ -121,12 +157,28 @@ async def wallet_paper_evidence(session: AsyncSession, wallet: Wallet) -> dict:
         "approved_at": boundary.isoformat() if boundary else None,
         "source_trades_observed": source_count,
         "eligible_source_trades": eligible_count,
-        "signals_generated": signal_count,
-        "copied_trades": copied, "partial_fills": partial,
-        "misses": misses, "miss_reasons": reasons,
-        "stale_signals": reasons.get("stale_signal", 0),
-        "kill_switch_deferrals": deferrals,
-        "copy_rate": round(copied / eligible_count, 4) if eligible_count else None,
+        "signals_generated": current_signal_count,
+        "copied_trades": current_copied, "partial_fills": current_partial,
+        "misses": current_misses, "miss_reasons": current_reasons,
+        "stale_signals": current_reasons.get("stale_signal", 0),
+        "kill_switch_deferrals": current_deferrals,
+        "copy_rate": round(current_copied / eligible_count, 4) if eligible_count else None,
+        "metric_scopes": {
+            "source_trades_observed": "lifetime",
+            "eligible_source_trades": "current_approval_period",
+            "signals_generated": "current_approval_period",
+            "copied_trades": "current_approval_period",
+            "copy_rate": "current_approval_period",
+            "copied_realized_pnl_usd": "lifetime",
+            "median_detection_lag_seconds": "current_approval_period",
+            "median_adverse_slippage": "current_approval_period",
+            "distribution_sample_size": "current_approval_period",
+        },
+        "lifetime_signals_generated": signal_count,
+        "lifetime_copied_trades": copied,
+        "lifetime_partial_fills": partial,
+        "lifetime_misses": misses,
+        "lifetime_miss_reasons": reasons,
         "median_detection_lag_seconds": _percentile(lags, 0.5),
         "p90_detection_lag_seconds": _percentile(lags, 0.9),
         "p95_detection_lag_seconds": _percentile(lags, 0.95),
@@ -143,7 +195,7 @@ async def wallet_paper_evidence(session: AsyncSession, wallet: Wallet) -> dict:
         "open_exposure_usd": round(open_exposure, 6),
         "per_market_open_exposure": open_positions,
         "distribution_sample_size": len(sample),
-        "distribution_sample_truncated": signal_count > len(sample),
+        "distribution_sample_truncated": current_signal_count > len(sample),
         "position_sample_truncated": len(positions) == 1000,
         "source_wallet_performance_comparison": {
             "available": False,

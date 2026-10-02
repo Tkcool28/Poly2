@@ -792,6 +792,37 @@ async def test_disabled_wallet_cannot_execute_delayed_signal(session):
     ) == 0
 
 
+async def test_reenabled_wallet_cannot_execute_signal_from_disabled_interval(session):
+    """A fresh re-enable boundary blocks pending signals created beforehand."""
+    trade = await _seed_approved_trade(session)
+    await detect_signals(session, now=NOW)
+    signal = (await session.execute(select(Signal))).scalar_one()
+
+    wallet = await session.get(Wallet, trade.wallet_id)
+    wallet.approval_state = "disabled"
+    await session.commit()
+    wallet.approval_state = "approved"
+    wallet.approved_at = NOW
+    await session.commit()
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("book request must not happen for pre-reenable signal")
+
+    transport = httpx.MockTransport(boom)
+    async with PolymarketClient(
+        http_client=httpx.AsyncClient(transport=transport)
+    ) as client:
+        order = await execute_signal(session, client, signal)
+
+    assert order is not None
+    assert order.status == "missed"
+    assert order.miss_reason == "wallet_not_approved"
+    assert signal.status == "skipped"
+    assert await session.scalar(
+        select(func.count(Position.id)).where(Position.quantity > 0)
+    ) == 0
+
+
 async def test_fee_aware_buy_sell_round_trip(session, monkeypatch):
     """HARDENING #9: BUY fee enters cost basis, SELL fee exits realized
     P&L — PaperOrder fees and portfolio P&L agree exactly."""

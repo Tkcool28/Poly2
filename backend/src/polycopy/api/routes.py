@@ -51,6 +51,9 @@ _ALLOWED_TRANSITIONS = {
     "approve": ("pending_review", "approved"),
     "reject": ("pending_review", "rejected"),
     "disable": ("approved", "disabled"),
+    # A previous human approval can be resumed, but gets a new copy boundary:
+    # no trades during the disabled interval can be copied after re-enabling.
+    "reenable": ("disabled", "approved"),
 }
 
 # Explicit decision-log action names — never derive verbs by string
@@ -59,6 +62,7 @@ _ACTION_LOG_NAMES = {
     "approve": "wallet_approved",
     "reject": "wallet_rejected",
     "disable": "wallet_disabled",
+    "reenable": "wallet_reenabled",
 }
 
 
@@ -330,7 +334,7 @@ async def list_approval_queue(db: AsyncSession = Depends(get_db)) -> dict:
 async def transition_wallet(
     wallet_id: int, action: str, db: AsyncSession = Depends(get_db)
 ) -> dict:
-    """Human decision: approve / reject / disable a wallet.
+    """Human decision: approve / reject / disable / re-enable a wallet.
 
     The state transition is a single conditional UPDATE: the required
     source state is part of the WHERE clause, so two concurrent requests

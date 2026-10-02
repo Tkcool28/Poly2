@@ -268,6 +268,12 @@ async def execute_signal(
         wallet is None
         or wallet.approval_state != "approved"
         or wallet.approved_at is None
+        # Re-check the approval boundary as well as current state.  A signal
+        # can remain pending through the review delay while a wallet is
+        # disabled, then be re-enabled with a fresh approved_at timestamp.
+        # That old signal must never execute after re-enabling.
+        or _aware(signal.t0_traded_at) < _aware(wallet.approved_at)
+        or _aware(signal.t1_detected_at) < _aware(wallet.approved_at)
     ):
         order = await _record_skip(session, signal, reason="wallet_not_approved",
                                    now=now, order_kwargs={})
