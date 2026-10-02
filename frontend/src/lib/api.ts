@@ -115,11 +115,14 @@ export interface WalletPaperEvidence {
   approval_state: string;
   source_trades_observed: number;
   eligible_source_trades: number;
+  signals_generated: number;
   copied_trades: number;
+  lifetime_copied_trades: number;
   partial_fills: number;
   misses: number;
   stale_signals: number;
   copy_rate: number | null;
+  metric_scopes: Record<string, "lifetime" | "current_approval_period">;
   median_detection_lag_seconds: number | null;
   copied_realized_pnl_usd: number;
   source_wallet_performance_comparison: { available: boolean; reason: string };

@@ -88,14 +88,17 @@ export default function Overview() {
             <div key={wallet.wallet_id} className="rounded-xl bg-gray-900 p-3 text-sm">
               <div className="font-medium text-gray-200">{wallet.wallet}</div>
               <div className="mt-1 text-gray-400">
-                {wallet.source_trades_observed} observed · {wallet.copied_trades} copied · {wallet.misses} missed
+                Lifetime: {wallet.source_trades_observed} observed · {wallet.lifetime_copied_trades} copied
+              </div>
+              <div className="mt-1 text-gray-400">
+                Current approval period: {wallet.eligible_source_trades} eligible · {wallet.copied_trades} copied · {wallet.misses} missed
                 {wallet.stale_signals > 0 ? ` (${wallet.stale_signals} stale)` : ""}
               </div>
               <div className="mt-1 text-gray-400">
-                Copy rate {wallet.copy_rate === null ? "pending" : `${Math.round(wallet.copy_rate * 100)}%`}
+                Current-period copy rate {wallet.copy_rate === null ? "pending" : `${Math.round(wallet.copy_rate * 100)}%`}
                 {wallet.median_detection_lag_seconds !== null
                   ? ` · Median lag ${wallet.median_detection_lag_seconds}s` : ""}
-                {` · Realized ${fmtSignedUsd(wallet.copied_realized_pnl_usd)}`}
+                {` · Lifetime realized ${fmtSignedUsd(wallet.copied_realized_pnl_usd)}`}
               </div>
               {!wallet.source_wallet_performance_comparison.available && (
                 <div className="mt-1 text-xs text-gray-500">

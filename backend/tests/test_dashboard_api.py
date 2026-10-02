@@ -27,6 +27,7 @@ from polycopy.models import (
     Position,
     ServiceHeartbeat,
     Signal,
+    Trade,
     Wallet,
     WalletScore,
 )
@@ -172,6 +173,89 @@ async def test_paper_evidence_api_exposes_copy_metrics_without_inventing_source_
     backlog = client.get("/paper/backlog").json()
     assert backlog["pending"] == 0
     assert backlog["kill_switch_enabled"] is True
+
+
+async def test_paper_evidence_separates_reenabled_period_from_lifetime_history(
+    client, session
+):
+    """Historical copies remain visible, but cannot inflate a new-period rate."""
+    wallet, market, old_signal = await _seed(session)
+    old_trade = Trade(
+        polymarket_trade_id="old-trade",
+        market_id=market.id,
+        wallet_id=wallet.id,
+        asset_id="4667",
+        side="BUY",
+        outcome="Yes",
+        size=Decimal(10),
+        price=Decimal("0.45"),
+        fee=Decimal(0),
+        traded_at=datetime(2026, 9, 10, tzinfo=UTC),
+        ingested_at=datetime(2026, 9, 10, 0, 1, tzinfo=UTC),
+    )
+    session.add(old_trade)
+    # Stop following, then re-enable at a later boundary. The old signal/order
+    # and position remain persisted history.
+    wallet.approval_state = "disabled"
+    await session.commit()
+    wallet.approval_state = "approved"
+    wallet.approved_at = datetime(2026, 9, 20, tzinfo=UTC)
+    new_trade = Trade(
+        polymarket_trade_id="new-trade",
+        market_id=market.id,
+        wallet_id=wallet.id,
+        asset_id="4667",
+        side="BUY",
+        outcome="Yes",
+        size=Decimal(10),
+        price=Decimal("0.46"),
+        fee=Decimal(0),
+        traded_at=datetime(2026, 9, 21, tzinfo=UTC),
+        ingested_at=datetime(2026, 9, 21, 0, 1, tzinfo=UTC),
+    )
+    session.add(new_trade)
+    new_signal = Signal(
+        wallet_id=wallet.id,
+        market_id=market.id,
+        source_trade_id="new-signal",
+        asset_id="4667",
+        side="BUY",
+        outcome="Yes",
+        source_price=Decimal("0.460000"),
+        status="executed",
+        t0_traded_at=new_trade.traded_at,
+        t1_detected_at=new_trade.ingested_at,
+    )
+    session.add(new_signal)
+    await session.flush()
+    session.add(
+        PaperOrder(
+            idempotency_key="new-order",
+            signal_id=new_signal.id,
+            market_id=market.id,
+            wallet_id=wallet.id,
+            side="BUY",
+            size=Decimal("10.000000"),
+            price=Decimal("0.500000"),
+            status="filled",
+            fill_price=Decimal("0.470000"),
+            filled_size=Decimal("21.276596"),
+            fee=Decimal("0.100000"),
+        )
+    )
+    await session.commit()
+
+    row = client.get("/paper/evidence").json()["items"][0]
+    assert row["source_trades_observed"] == 2
+    assert row["eligible_source_trades"] == 1
+    assert row["signals_generated"] == 1
+    assert row["copied_trades"] == 1
+    assert row["copy_rate"] == 1.0
+    assert row["lifetime_signals_generated"] == 2
+    assert row["lifetime_copied_trades"] == 2
+    assert row["metric_scopes"]["copied_trades"] == "current_approval_period"
+    assert row["metric_scopes"]["copied_realized_pnl_usd"] == "lifetime"
+    assert old_signal.id != new_signal.id
 
 
 async def test_signal_without_order_reports_null_copy_result(client, session):
