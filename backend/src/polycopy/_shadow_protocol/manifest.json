@@ -1,0 +1,13 @@
+{
+  "files": {
+    "bounded_journal.py": "c9f3a134bb6f2f6fd85bb6dc970394a446f378445fabecf7a641ff333d84d905",
+    "exact_clock.py": "482010def6bbe3c069e9474ee7f88f50ef4ae7965c9ad019c34ca870571719b5",
+    "poly2-comparison-checkpoint.py": "01a5599f80a1a540628eb2bc43bd6565d910fa986b73bfa607e19c40ccc50e12",
+    "poly2-comparison-drain.py": "7a37349acbf471b883f8132fe8970dc6e5db3201e87ed508c30db2a074fc0131",
+    "poly2-comparison-fence.py": "29536001414b11a85f18c3870567bfcda13826da74fa2bc007d36b3af8fb83aa",
+    "poly2-comparison-session-observer.py": "686ae8f79fc80a7c5daa12c25581e37d61480594e4a1175b5e340df9919d11cf",
+    "poly2-comparison-source-hook.py": "9eb1163c595941ea686c5136bc6e01b0b58b03d11ba9bef04162123ba5ebd2e0",
+    "production_authority.py": "1945d3b031ab435d9c85814c47a29ca0d4453984f08fda3c148b64eda41b0010"
+  },
+  "shadowSha": "fc8eb3b755c22695179c75968a84721be7590232"
+}

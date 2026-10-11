@@ -27,7 +27,11 @@ def get_engine() -> AsyncEngine:
             max_overflow=settings.db_max_overflow,
             pool_pre_ping=True,
         )
-        _sessionmaker = async_sessionmaker(_engine, expire_on_commit=False)
+        from polycopy.shadow_capture import install_factory
+
+        _sessionmaker = install_factory(
+            async_sessionmaker(_engine, expire_on_commit=False), settings
+        )
     return _engine
 
 
@@ -45,6 +49,8 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 
 async def dispose_engine() -> None:
     global _engine, _sessionmaker
+    from polycopy.shadow_capture import shutdown
+    await shutdown()
     if _engine is not None:
         await _engine.dispose()
     _engine = None

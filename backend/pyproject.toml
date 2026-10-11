@@ -21,13 +21,22 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+comparison = [
+    "cryptography==50.0.2",
+    "rfc8785==0.1.4",
+]
 dev = [
+    "cryptography==50.0.2",
+    "rfc8785==0.1.4",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "ruff>=0.5",
     "aiosqlite>=0.20",
 ]
+
+[tool.setuptools.package-data]
+"polycopy._shadow_protocol" = ["manifest.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -44,3 +53,7 @@ target-version = "py312"
 [tool.ruff.lint]
 # B008: Depends() in argument defaults is the idiomatic FastAPI pattern
 ignore = ["B008"]
+
+# Exact reviewed upstream bytes are hash-verified, not locally reformatted.
+[tool.ruff.lint.per-file-ignores]
+"src/polycopy/_shadow_protocol/*.py" = ["I001", "S102", "UP017", "C408", "SIM115", "S110", "BLE001", "F401", "F841", "PERF102", "TRY004"]

@@ -177,6 +177,8 @@ async def run() -> None:
             except TimeoutError:
                 pass
 
+    from polycopy.shadow_capture import shutdown
+    await shutdown()
     logger.info("bot_stopped")
 
 

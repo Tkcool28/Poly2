@@ -41,6 +41,10 @@ async def lifespan(app: FastAPI):
         paper_mode=settings.paper_mode,
         kill_switch=settings.order_kill_switch,
     )
+    if settings.shadow_capture_enabled:
+        # Install/enroll before the first API dependency or scoring session exists.
+        from polycopy.db import get_sessionmaker
+        get_sessionmaker()
     yield
     await dispose_engine()
     logger.info("api_stopped")

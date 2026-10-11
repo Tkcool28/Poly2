@@ -47,6 +47,20 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 5
 
+    # --- Prospective comparison observation (disabled, no identity defaults) ---
+    shadow_capture_enabled: bool = False
+    shadow_capture_service: str = ""
+    shadow_capture_worker: str = ""
+    shadow_capture_run_id: str = ""
+    shadow_capture_generation_id: str = ""
+    shadow_capture_authority_path: str = ""
+    shadow_capture_authority_pin: str = ""
+    shadow_capture_private_key_path: str = ""
+    shadow_capture_fence_path: str = ""
+    shadow_capture_drain_path: str = ""
+    shadow_capture_handoff_path: str = ""
+    shadow_capture_health_path: str = ""
+
     # --- API -------------------------------------------------------------
     api_host: str = "0.0.0.0"
     api_port: int = 8000
