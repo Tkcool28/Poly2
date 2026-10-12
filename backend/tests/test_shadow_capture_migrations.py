@@ -36,7 +36,7 @@ async def test_capture_native_migration_roundtrip():
         # Never replace a preexisting database, even within an owned fixture.
         await conn.execute(text("CREATE DATABASE " + name))
     async def alembic(*args):
-        env = {**os.environ, "POLYCOPY_DATABASE_URL": url,
+        env = {**os.environ, "POLYCOPY_DATABASE_URL": str(url),
                "POLYCOPY_PAPER_MODE": "true", "POLYCOPY_ALLOW_LIVE_TRADING": "false",
                "POLYCOPY_ORDER_KILL_SWITCH": "true", "POLYCOPY_SHADOW_CAPTURE_ENABLED": "false"}
         p = await asyncio.to_thread(subprocess.run, [sys.executable, "-m", "alembic", *args],
