@@ -1,6 +1,7 @@
 """Disposable native proofs: no implicit DSN, network/provider or live key.
 
-Set POLY2_CAPTURE_TEST_SOCKET to an explicitly owned fixture Unix socket dir.
+Use either an explicitly owned Unix socket fixture or an explicit localhost CI
+database URL. Neither path has a production default.
 """
 import json
 import os
@@ -19,13 +20,23 @@ from polycopy.models import Base, Market, Signal, Trade, Wallet
 from polycopy.shadow_reader import read_operation
 
 
-@pytest.fixture
-async def native(tmp_path, monkeypatch):
+def _native_test_url():
+    url = os.environ.get("POLY2_CAPTURE_TEST_URL")
+    if url:
+        assert url.startswith(("postgresql+asyncpg://polycopy@localhost:",
+                               "postgresql+asyncpg://polycopy@127.0.0.1:"))
+        assert url.endswith("/polycopy_test")
+        return url
     socket = os.environ.get("POLY2_CAPTURE_TEST_SOCKET")
     if not socket:
-        pytest.skip("explicit owned Unix socket fixture required")
+        pytest.skip("explicit owned Unix socket or localhost CI fixture required")
     assert socket.startswith("/proc/") and socket.endswith("/root/var/run/postgresql")
-    url = "postgresql+asyncpg://postgres@/postgres?host=" + socket
+    return "postgresql+asyncpg://postgres@/postgres?host=" + socket
+
+
+@pytest.fixture
+async def native(tmp_path, monkeypatch):
+    url = _native_test_url()
     engine = create_async_engine(url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
@@ -928,7 +939,7 @@ from datetime import datetime,timezone
 from polycopy.shadow_capture import install_factory,CaptureFactory
 async def run():
  cfg=Settings(_env_file=None,**json.load(open(sys.argv[1])))
- assert '/proc/' in cfg.database_url
+ assert ('/proc/' in cfg.database_url or '@localhost:' in cfg.database_url or '@127.0.0.1:' in cfg.database_url)
  e=create_async_engine(cfg.database_url)
  f=install_factory(async_sessionmaker(e,expire_on_commit=False),cfg)
  assert isinstance(f,CaptureFactory)
