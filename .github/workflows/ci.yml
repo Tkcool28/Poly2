@@ -23,6 +23,18 @@ jobs:
           --health-retries 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        with:
+          repository: Tkcool28/poly_shadow
+          ref: fc8eb3b755c22695179c75968a84721be7590232
+          path: .ci-shadow
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install exact Shadow comparator dependencies
+        run: npm ci --ignore-scripts --prefix .ci-shadow
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -33,6 +45,8 @@ jobs:
       - name: Pytest
         env:
           POLYCOPY_TEST_POSTGRES_URL: postgresql+asyncpg://polycopy@localhost:5432/polycopy_test
+          POLY2_CAPTURE_TEST_URL: postgresql+asyncpg://polycopy@localhost:5432/polycopy_test
+          POLY2_CAPTURE_SHADOW_ROOT: ${{ github.workspace }}/.ci-shadow
         run: cd backend && pytest
 
   frontend:
