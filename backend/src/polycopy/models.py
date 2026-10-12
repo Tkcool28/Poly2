@@ -135,6 +135,16 @@ class Trade(Base):
     wallet: Mapped[Wallet] = relationship(back_populates="trades")
 
 
+class ComparisonTransactionWitness(Base):
+    """Append-only comparison evidence; no historical backfill or trading FK."""
+
+    __tablename__ = "comparison_transaction_witness"
+    transaction_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    binding_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class Settlement(Base):
     """Record of a market resolving — feeds realized P&L for scoring."""
 
