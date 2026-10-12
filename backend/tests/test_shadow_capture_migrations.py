@@ -7,19 +7,30 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
 
 async def test_capture_native_migration_roundtrip():
+    explicit = os.environ.get("POLY2_CAPTURE_TEST_URL")
     socket = os.environ.get("POLY2_CAPTURE_TEST_SOCKET")
-    if not socket:
-        pytest.skip("explicit owned fixture socket required")
-    assert socket.startswith("/proc/") and socket.endswith("/root/var/run/postgresql")
+    if explicit:
+        assert explicit.startswith(("postgresql+asyncpg://polycopy@localhost:",
+                                    "postgresql+asyncpg://polycopy@127.0.0.1:"))
+        assert explicit.endswith("/polycopy_test")
+        base = make_url(explicit)
+        admin_url = base.set(database="postgres")
+        name = "poly2_capture_migration_owned"
+        url = base.set(database=name)
+    else:
+        if not socket:
+            pytest.skip("explicit owned Unix socket or localhost CI fixture required")
+        assert socket.startswith("/proc/") and socket.endswith("/root/var/run/postgresql")
+        admin_url = make_url("postgresql+asyncpg://postgres@/postgres?host=" + socket)
+        name = "poly2_capture_migration_owned"
+        url = make_url("postgresql+asyncpg://postgres@/" + name + "?host=" + socket)
     root = Path(__file__).resolve().parents[1]
-    admin_url = "postgresql+asyncpg://postgres@/postgres?host=" + socket
     admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT")
-    name = "poly2_capture_migration_owned"
-    url = "postgresql+asyncpg://postgres@/" + name + "?host=" + socket
     engine = create_async_engine(url)
     async with admin.connect() as conn:
         # Never replace a preexisting database, even within an owned fixture.
