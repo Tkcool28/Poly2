@@ -1020,11 +1020,13 @@ async def test_capture_multi_instance_enrollment_and_each_ack(native, tmp_path, 
 
 
 @pytest.mark.parametrize("fault", ["owner", "directory"])
-async def test_capture_key_custody_type_owner(native, fault):
+async def test_capture_key_custody_type_owner(native, fault, monkeypatch):
     n = native
     path = Path(n["settings"].shadow_capture_private_key_path)
     if fault == "owner":
-        os.chown(path, 65534, 65534)
+        # GitHub-hosted runners cannot chown files to another UID. Simulate the
+        # independently observable owner mismatch at the authority module boundary.
+        monkeypatch.setattr(n["a"].os, "geteuid", lambda: os.geteuid() + 1)
     else:
         path.unlink()
         path.mkdir(mode=0o600)
