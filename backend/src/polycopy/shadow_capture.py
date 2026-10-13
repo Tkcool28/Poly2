@@ -20,7 +20,7 @@ from polycopy.shadow_failure import failed, invalidate, invalidate_retained, ret
 LOGGER = logging.getLogger(__name__)
 ROOT = Path(__file__).parent
 PROTOCOL = ROOT / "_shadow_protocol"
-SHADOW_SHA = "fc8eb3b755c22695179c75968a84721be7590232"
+PROTOCOL_SOURCE_SHADOW_SHA = "fc8eb3b755c22695179c75968a84721be7590232"
 _state = {"state": "DISABLED", "comparisonEligible": False}
 _runtime = None
 
@@ -43,7 +43,7 @@ def identities():
     manifest = json.loads((PROTOCOL / "manifest.json").read_text())
     actual = {name: hashlib.sha256((PROTOCOL / name).read_bytes()).hexdigest()
               for name in manifest["files"]}
-    if actual != manifest["files"] or manifest["shadowSha"] != SHADOW_SHA:
+    if actual != manifest["files"] or manifest["shadowSha"] != PROTOCOL_SOURCE_SHADOW_SHA:
         raise ValueError("installed reviewed protocol bytes differ")
     component = {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                  for name in ("shadow_capture.py", "shadow_observer.py", "shadow_reader.py", "shadow_controller.py", "shadow_failure.py", "db.py")}
@@ -55,6 +55,22 @@ def deployed_sha():
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, timeout=5
     ).strip()
+
+
+def validate_installed_identity(binding, settings):
+    """Check locally provable producer identities after independent authority validation.
+
+    shadowCodeSha is required/validated by the pinned authority, not derived from
+    protocol provenance. The Shadow launcher proves its checkout against that SHA.
+    Both enrollment and lifecycle controls use this same producer comparison.
+    """
+    protocol, component = identities()
+    expected = {"poly2CodeSha": deployed_sha(),
+                "protocolDigest": protocol, "componentSha256": component,
+                "runId": settings.shadow_capture_run_id,
+                "generationId": settings.shadow_capture_generation_id}
+    if any(binding.get(k) != v for k, v in expected.items()):
+        raise ValueError("independently approved installed identity mismatch")
 
 
 def _fail(settings, error):
@@ -170,13 +186,7 @@ def install_factory(maker, settings):
         authority = json.loads(Path(settings.shadow_capture_authority_path).read_text())
         binding = authority["binding"]
         a.validate(authority, settings.shadow_capture_authority_pin, binding)
-        protocol, component = identities()
-        expected = {"poly2CodeSha": deployed_sha(), "shadowCodeSha": SHADOW_SHA,
-                    "protocolDigest": protocol, "componentSha256": component,
-                    "runId": settings.shadow_capture_run_id,
-                    "generationId": settings.shadow_capture_generation_id}
-        if any(binding.get(k) != v for k, v in expected.items()):
-            raise ValueError("independently approved installed identity mismatch")
+        validate_installed_identity(binding, settings)
         if worker not in binding["expectedWorkers"]:
             raise ValueError("undeclared worker incarnation")
         roots = [Path(p).resolve() for p in (settings.shadow_capture_fence_path,
