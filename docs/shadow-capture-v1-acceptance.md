@@ -7,7 +7,7 @@ installation, migration, observation window or launch was performed.
 
 Base/HEAD: `bd61efc90a4ff8bfc17b8a31abc4a40dd655f81f`.
 Branch: `feat/shadow-prospective-capture-v1` (unstaged).
-Exact consumer: `fc8eb3b755c22695179c75968a84721be7590232`.
+Historical test consumer (not a runtime revision requirement): `fc8eb3b755c22695179c75968a84721be7590232`.
 
 ## Blocking-review correction proofs
 

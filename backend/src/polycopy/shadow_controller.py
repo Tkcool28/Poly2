@@ -23,13 +23,7 @@ def open_fence(settings):
     authority = json.loads(Path(settings.shadow_capture_authority_path).read_text())
     binding = authority["binding"]
     a.validate(authority, settings.shadow_capture_authority_pin, binding)
-    protocol, component = capture.identities()
-    expected = {"poly2CodeSha": capture.deployed_sha(), "shadowCodeSha": capture.SHADOW_SHA,
-                "protocolDigest": protocol, "componentSha256": component,
-                "runId": settings.shadow_capture_run_id,
-                "generationId": settings.shadow_capture_generation_id}
-    if any(binding.get(k) != v for k, v in expected.items()):
-        raise ValueError("approved installed identity mismatch")
+    capture.validate_installed_identity(binding, settings)
     roots = [Path(p).resolve() for p in (settings.shadow_capture_fence_path,
              settings.shadow_capture_drain_path, settings.shadow_capture_handoff_path) if p]
     if len(roots) != 3:

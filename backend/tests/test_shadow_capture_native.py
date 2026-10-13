@@ -35,7 +35,7 @@ def _native_test_url():
 
 
 @pytest.fixture
-async def native(tmp_path, monkeypatch):
+async def native(tmp_path, monkeypatch, request):
     url = _native_test_url()
     engine = create_async_engine(url)
     async with engine.begin() as conn:
@@ -66,7 +66,7 @@ async def native(tmp_path, monkeypatch):
     protocol, component = capture.identities()
     binding = {"runId": "disposable-poly2", "shadowRunId": "disposable-shadow",
                    "generationId": "generation-v1", "poly2CodeSha": capture.deployed_sha(),
-                   "shadowCodeSha": capture.SHADOW_SHA, "protocolDigest": protocol,
+                   "shadowCodeSha": getattr(request, "param", capture.PROTOCOL_SOURCE_SHADOW_SHA), "protocolDigest": protocol,
                    "componentSha256": component, "cohort": ["0x" + str(i) * 40 for i in range(1, 6)],
                    "window": {"startUtc": start.isoformat().replace("+00:00", "Z"),
                                "endUtc": end.isoformat().replace("+00:00", "Z")},
@@ -281,7 +281,7 @@ async def test_capture_config_failure_source_available(native, field, value):
     assert settings.paper_mode and not settings.allow_live_trading and settings.order_kill_switch
 
 
-@pytest.mark.parametrize("field", ["poly2CodeSha", "shadowCodeSha", "componentSha256", "protocolDigest"])
+@pytest.mark.parametrize("field", ["poly2CodeSha", "componentSha256", "protocolDigest"])
 async def test_capture_actual_installed_identity(native, field):
     n = native
     path = Path(n["settings"].shadow_capture_authority_path)
@@ -1085,3 +1085,20 @@ async def test_capture_missing_instance_enrollment_restart(native, tmp_path, mis
     finally:
         for factory in factories:
             await factory.close()
+
+
+@pytest.mark.parametrize("native", ["71ddacf318cccb1c5bef1a2263ac6cb00ae75ed3"], indirect=True)
+async def test_native_runtime_shadow_revision_differs_from_protocol_provenance(native):
+    from polycopy.shadow_controller import open_fence
+    assert native["binding"]["shadowCodeSha"] != capture.PROTOCOL_SOURCE_SHADOW_SHA
+    # Both real workers enrolled in the native fixture; controller reopens it.
+    _, fence = open_fence(native["settings"])
+    try:
+        assert fence.status()
+    finally:
+        fence.close()
+    async with native["bot"]() as session:
+        session.add(make_trade(native))
+        await session.commit()
+    await recover(native)
+    assert await close_freeze(native)

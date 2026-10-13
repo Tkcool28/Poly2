@@ -8,7 +8,15 @@ snapshot, MAX timestamp, current order status, current approval or settlement.
 
 ## Installed contract and architecture
 
-The consumer is pinned to `fc8eb3b755c22695179c75968a84721be7590232`.
+The vendored protocol-source provenance is pinned to
+`fc8eb3b755c22695179c75968a84721be7590232`; it is not a runtime consumer gate.
+The independently supplied, independently pinned authority approves the required
+full lowercase 40-hex `binding.shadowCodeSha`. The Shadow launcher verifies its
+actual checkout against that approved revision. Poly2 verifies its own deployed
+revision, installed protocol/component digests and configured run/generation;
+enrollment and controller lifecycle operations share that comparison.
+All eight vendored scripts are byte-identical at approved intended Shadow runtime
+`71ddacf318cccb1c5bef1a2263ac6cb00ae75ed3`, so provenance and hashes remain unchanged.
 `backend/src/polycopy/_shadow_protocol/manifest.json` records exact upstream script
 hashes; those scripts are unchanged. Local integration differences are confined to
 `shadow_capture.py`, `shadow_observer.py`, `shadow_reader.py`, `shadow_controller.py`
